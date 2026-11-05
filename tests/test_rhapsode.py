@@ -72,6 +72,20 @@ def test_smart_card_needs_an_image_that_says_so(images):
         "Gatus" if any("gatus" in i for i in images) else "")
 
 
+@pytest.mark.parametrize("images,want", [
+    (["ghcr.io/barakplasma/hazarot:sha-0249c07"], ""),  # live: Hazarot's cached label says Gatus
+    ([], ""),
+    (["ghcr.io/twin/gatus:v5.12"], "Gatus"),
+])
+def test_a_cached_smart_card_is_rechecked_when_the_card_is_built(images, want):
+    b = _backend("ns", "svc", (), "x.example.com")
+    b.images = images
+    stale = {"name": "Hazarot", "subtitle": "s", "category": "Other", "icon": "fas fa-x", "confidence": 1,
+             "hide": False, "primary_host": "x.example.com", "api_docs": [], "smart_card": "Gatus"}
+    assert controller.card(b, stale, {"x.example.com"})["smart_card"] == want
+    assert controller.card(b, {**stale, "smart_card": ["Gatus"]}, {"x.example.com"})["smart_card"] == ""
+
+
 @pytest.mark.parametrize("body,want", [
     ('{"openapi": "3.1.0", "info": {"title": "Queue API"}}', ("openapi", "Queue API")),
     ("openapi: 3.0.0\ninfo:\n  title: Weather\n", ("openapi", "Weather")),

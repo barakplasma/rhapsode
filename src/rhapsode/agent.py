@@ -62,6 +62,13 @@ NS_SCHEMA = {
 }
 
 
+def smart_card_for(name, images) -> str:
+    """The smart card, only if a container image behind the Service says it is that product, else "". Applied when
+    the card is built, not only when the agent answers: a cached label from before this rule must not keep a card."""
+    ok = isinstance(name, str) and name in SMART_CARDS and SMART_CARDS[name] in " ".join(images).lower()
+    return name if ok else ""
+
+
 def _s(raw: dict, k: str, n: int) -> str:
     return str(raw.get(k) or "")[:n].strip()
 
@@ -73,7 +80,6 @@ def _icon(raw: dict, default: str) -> str:
 def clean(raw: dict, hosts: list[str], confirmed: dict[str, dict], images: list[str] = ()) -> dict:
     """Model output is untrusted even with a schema: clamp lengths, whitelist every enum-like field, keep only API
     doc paths the find_api_docs tool itself confirmed in this run, and a smart card only if an image is that product."""
-    pool = " ".join(images).lower()
     out = {
         "name": _s(raw, "name", 24),
         "subtitle": _s(raw, "subtitle", 60),
@@ -85,8 +91,7 @@ def clean(raw: dict, hosts: list[str], confirmed: dict[str, dict], images: list[
         "api_docs": [{"path": p, "kind": confirmed[p]["kind"], "title": str(confirmed[p].get("title", ""))[:60]}
                      for p in dict.fromkeys(raw.get("api_docs") or [])
                      if isinstance(p, str) and p in confirmed and confirmed[p].get("kind") in DOC_KINDS][:3],
-        "smart_card": raw["smart_card"] if raw.get("smart_card") in SMART_CARDS
-        and SMART_CARDS[raw["smart_card"]] in pool else "",
+        "smart_card": smart_card_for(raw.get("smart_card"), images),
     }
     if not out["name"]:
         raise ValueError("agent returned no name")
