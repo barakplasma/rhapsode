@@ -30,6 +30,7 @@ class Backend:
     port: int | str
     endpoints: list[Endpoint]
     images: list[str] = field(default_factory=list)
+    selector: tuple = ()  # the Service's pod selector, sorted; () when unknown or none
 
     @property
     def hosts(self) -> list[str]:
@@ -57,18 +58,34 @@ def group_backends(endpoints: list[Endpoint]) -> list[Backend]:
     return sorted(out.values(), key=lambda b: b.key_id)
 
 
-def backend_images(b: Backend) -> list[str]:
-    """Container images behind the Service, so a new release gets a fresh label. [] if unknown."""
+def backend_workload(b: Backend) -> tuple[tuple, list[str]]:
+    """(pod selector, container images) behind the Service; ((), []) if unknown. The images make a new release
+    get a fresh label, the selector tells that two Services are one workload."""
     if not b.service:
-        return []
+        return (), []
     core = client.CoreV1Api()
     try:
         svc = core.read_namespaced_service(b.service, b.namespace)
-        sel = ",".join(f"{k}={v}" for k, v in (svc.spec.selector or {}).items())
+        selector = tuple(sorted((svc.spec.selector or {}).items()))
+        sel = ",".join(f"{k}={v}" for k, v in selector)
         pods = core.list_namespaced_pod(b.namespace, label_selector=sel, limit=1).items if sel else []
     except client.ApiException:
-        return []
-    return sorted(c.image for c in pods[0].spec.containers) if pods else []
+        return (), []
+    return selector, sorted(c.image for c in pods[0].spec.containers) if pods else []
+
+
+def merge_by_workload(backends: list[Backend]) -> list[Backend]:
+    """Services in one namespace with the same pod selector are one workload (a second Service or Ingress for the
+    same Grafana): one card, with the extra hostnames as pills. A Service with no selector is never merged."""
+    out: dict[object, Backend] = {}
+    for b in backends:
+        m = out.setdefault((b.namespace, b.selector) if b.selector else id(b), b)
+        if m is b:
+            continue
+        m.endpoints = sorted(m.endpoints + b.endpoints, key=lambda e: e.host)
+        if b.service < m.service:  # a stable choice, so the cache key doesn't flap with list order
+            m.service, m.port = b.service, b.port
+    return sorted(out.values(), key=lambda b: b.key_id)
 
 
 def _public(cfg: Config, host: str, ns: str, ann: dict, klass: str | None) -> bool:

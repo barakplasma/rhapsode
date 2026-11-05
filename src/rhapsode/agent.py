@@ -10,7 +10,8 @@ from .tools import DOC_KINDS, build_server
 
 CATEGORIES = ["Dev", "Media", "Monitoring", "Data", "AI", "Infra", "Home", "Tools", "Other"]
 # Homer smart cards the agent may pick: plain version/status cards that need no API key in the config.
-SMART_CARDS = ["Gatus", "Olivetin"]
+# Value: what a container image of that product contains. The model's pick is only kept if an image says so.
+SMART_CARDS = {"Gatus": "gatus", "Olivetin": "olivetin"}
 
 SYSTEM = """You label one service for a Homer dashboard. It may be reachable through several hostnames.
 Use the tools sparingly: get_workload first, then get_argocd_app (Application names usually match the
@@ -23,7 +24,7 @@ name: short product name. subtitle: what it does for the user. hide: true only f
 webhook endpoints. icon: a Font Awesome 5 class like "fas fa-code-branch".
 primary_host: the hostname people should open (usually the most descriptive one).
 api_docs: only paths find_api_docs returned, best first (a human docs UI before a raw spec); [] if none.
-smart_card: "Gatus" or "Olivetin" only when the service is that product, else ""."""
+smart_card: "Gatus" or "Olivetin" only when the container image is that product (check get_workload), else ""."""
 
 NS_SYSTEM = """You title a group on a Homer dashboard. The group is one Kubernetes namespace; you get its name and
 the services in it. title: short, human (<=24 chars), e.g. "TRMNL" for byos-laravel; keep the namespace name if it
@@ -69,9 +70,10 @@ def _icon(raw: dict, default: str) -> str:
     return raw["icon"] if isinstance(raw.get("icon"), str) and _ICON.match(raw["icon"]) else default
 
 
-def clean(raw: dict, hosts: list[str], confirmed: dict[str, dict]) -> dict:
-    """Model output is untrusted even with a schema: clamp lengths, whitelist every enum-like field,
-    and keep only API doc paths the find_api_docs tool itself confirmed in this run."""
+def clean(raw: dict, hosts: list[str], confirmed: dict[str, dict], images: list[str] = ()) -> dict:
+    """Model output is untrusted even with a schema: clamp lengths, whitelist every enum-like field, keep only API
+    doc paths the find_api_docs tool itself confirmed in this run, and a smart card only if an image is that product."""
+    pool = " ".join(images).lower()
     out = {
         "name": _s(raw, "name", 24),
         "subtitle": _s(raw, "subtitle", 60),
@@ -83,7 +85,8 @@ def clean(raw: dict, hosts: list[str], confirmed: dict[str, dict]) -> dict:
         "api_docs": [{"path": p, "kind": confirmed[p]["kind"], "title": str(confirmed[p].get("title", ""))[:60]}
                      for p in dict.fromkeys(raw.get("api_docs") or [])
                      if isinstance(p, str) and p in confirmed and confirmed[p].get("kind") in DOC_KINDS][:3],
-        "smart_card": raw.get("smart_card") if raw.get("smart_card") in SMART_CARDS else "",
+        "smart_card": raw["smart_card"] if raw.get("smart_card") in SMART_CARDS
+        and SMART_CARDS[raw["smart_card"]] in pool else "",
     }
     if not out["name"]:
         raise ValueError("agent returned no name")
@@ -122,7 +125,7 @@ async def describe(cfg: Config, b: Backend, allowed_hosts: set[str]) -> dict:
     server, allowed, confirmed = build_server(cfg, allowed_hosts, b)
     raw = await _run(cfg, SYSTEM, "Describe this service:\n" + json.dumps(b.as_dict(), indent=1),
                      label_schema(b.hosts), cfg.max_turns, mcp_servers={"disc": server}, allowed_tools=allowed)
-    return clean(raw, b.hosts, confirmed)
+    return clean(raw, b.hosts, confirmed, b.images)
 
 
 async def name_namespace(cfg: Config, namespace: str, cards: list[dict]) -> dict:

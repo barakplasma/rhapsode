@@ -1,6 +1,7 @@
 """Tools the agent can call. Exposed to the Claude Agent SDK as an in-process MCP server."""
 import asyncio
 import json
+import logging
 import re
 from urllib.parse import quote, urlparse
 
@@ -10,6 +11,8 @@ from kubernetes import client
 
 from .config import Config
 from .discovery import Backend
+
+log = logging.getLogger("rhapsode")
 
 MAX = 3000  # chars returned per tool call; keeps context small
 
@@ -186,6 +189,7 @@ def build_server(cfg: Config, allowed_hosts: set[str], backend: Backend | None =
         ports = svc.spec.ports or []
         port = next((p.port for p in ports if backend.port in (p.port, p.name)), ports[0].port if ports else 80)
         found = await probe_docs(f"http://{backend.service}.{backend.namespace}.svc:{port}")
+        log.info("api docs probe %s/%s:%s -> %s", backend.namespace, backend.service, port, sorted(found) or "none")
         confirmed.update(found)
         return _txt(found or "no API docs found")
 

@@ -85,6 +85,13 @@ one **backend**: one agent run, one Homer card. Three hostnames for one Grafana
 become one card, and the extra hostnames become link pills on it. A route with
 no Service is a backend of its own.
 
+Two *Services* can still front the same pods (a second Service or Ingress added
+for the same Grafana). So backends in one namespace whose Services have the
+same pod selector are merged too, keeping the alphabetically first Service
+name so the cache key is stable. A Service with no selector (ExternalName, or
+hand-managed endpoints) is never merged, so those stay separate cards, told
+apart by the host suffix when their names collide.
+
 | Source | Backend | Scheme |
 |---|---|---|
 | `networking.k8s.io/v1` Ingress | the `/` path's Service, else the first path | `https` if the host is in `spec.tls`, else `http` |
@@ -192,6 +199,9 @@ docs of an API behind a login are the ones worth listing. The Homer link still
 goes to the public host (`<primary host><path>`), so a person goes through
 Access as usual.
 
+Each probe logs `api docs probe <ns>/<svc>:<port> -> [paths]` (or `none`), so
+"nothing found" can be told apart from "the agent never called it".
+
 The usual path here is: workload, then the Argo CD app (named after the
 namespace), then `get_repo` on `homelab-manifests` at `apps/<name>/values.yaml`.
 That file usually names the upstream repo in its first comment, and the agent
@@ -222,7 +232,10 @@ Treat it as untrusted, even with a schema:
 - `api_docs` keeps only paths that `find_api_docs` itself confirmed in the same
   run (at most 3), so the model cannot add a link;
 - `smart_card` must be on the allowlist (`Gatus`, `Olivetin`: cards that read a
-  status or a version and need no API key in the public config);
+  status or a version and need no API key in the public config) **and** a
+  container image behind the Service must contain the product's name. Without
+  the second check the model picked Gatus for a rehearsal chat app, which
+  broke its card; with no known image there is no smart card;
 - every URL is built from discovery plus a confirmed path, never taken from the
   model.
 

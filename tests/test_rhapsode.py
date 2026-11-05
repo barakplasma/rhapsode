@@ -6,7 +6,7 @@ import yaml
 
 from rhapsode import agent, approval, controller, homer, tools
 from rhapsode.config import Config
-from rhapsode.discovery import Endpoint, _public, group_backends
+from rhapsode.discovery import Endpoint, _public, group_backends, merge_by_workload
 
 CFG = Config(ingress_classes=["cloudflare-tunnel"], gitlab_url="https://gitlab.example.com",
              base_config_path="/nonexistent")
@@ -54,9 +54,22 @@ def test_clean_only_trusts_tool_confirmed_docs_hosts_and_cards():
     assert out["primary_host"] == HOSTS[0]  # not one of this backend's hosts -> first host
     assert out["smart_card"] == ""  # not in the allowlist
     assert out["api_docs"] == [{"path": "/swagger", "kind": "swagger-ui", "title": "Grafana HTTP API"}]
-    assert agent.clean(_raw(smart_card="Gatus"), HOSTS, CONFIRMED)["smart_card"] == "Gatus"
+    twin = ["ghcr.io/twin/gatus:v5.12"]
+    assert agent.clean(_raw(smart_card="Gatus"), HOSTS, CONFIRMED, twin)["smart_card"] == "Gatus"
+    assert agent.clean(_raw(smart_card="Olivetin"), HOSTS, CONFIRMED, ["ghcr.io/olivetin/OliveTin:2025"])[
+        "smart_card"] == "Olivetin"
     assert agent.clean_ns({"title": "", "icon": "bad"}, "byos-laravel") == {
         "title": "byos-laravel", "icon": "fas fa-layer-group"}
+
+
+@pytest.mark.parametrize("images", [
+    ["ghcr.io/barakplasma/hazarot:sha-0249c07"],  # live: the agent picked Gatus for a rehearsal chat app
+    ["ghcr.io/twin/gatus-proxy-not:1", "ghcr.io/x/olivetin:1"],  # the other product's image does not count
+    [],  # nothing known about the image: no smart card
+])
+def test_smart_card_needs_an_image_that_says_so(images):
+    assert agent.clean(_raw(smart_card="Gatus"), HOSTS, CONFIRMED, images)["smart_card"] == (
+        "Gatus" if any("gatus" in i for i in images) else "")
 
 
 @pytest.mark.parametrize("body,want", [
@@ -70,6 +83,35 @@ def test_clean_only_trusts_tool_confirmed_docs_hosts_and_cards():
 ])
 def test_classify_doc(body, want):
     assert tools.classify_doc(body) == want
+
+
+def _backend(ns, svc, sel, *hosts, port=80):
+    b = group_backends([Endpoint(f"https://{h}", h, "Ingress x/y", ns, svc, {}, port) for h in hosts])[0]
+    b.selector = tuple(sel)
+    return b
+
+
+def test_merge_by_workload_joins_services_that_select_the_same_pods():
+    grafana, mine = (("app", "grafana"),), (("app", "mine"),)
+
+    def mk():
+        return [
+            _backend("mon", "grafana", grafana, "grafana.example.com", "dashboard.example.com", port=3000),
+            _backend("mon", "claude-otel-grafana", grafana, "claude-otel.example.com", port=3001),
+            _backend("mon", "mine", mine, "mine.example.com"),
+            _backend("other", "grafana", grafana, "elsewhere.example.com"),  # same selector, other namespace
+            _backend("mon", "external", (), "ext-a.example.com"),  # no selector: never merged
+            _backend("mon", "external-2", (), "ext-b.example.com"),
+        ]
+
+    for backends in (mk(), mk()[::-1]):  # the result does not depend on list order
+        out = merge_by_workload(backends)
+        assert sorted((b.namespace, b.service, tuple(b.hosts)) for b in out) == [
+            ("mon", "claude-otel-grafana", ("claude-otel.example.com", "dashboard.example.com",
+                                            "grafana.example.com")),
+            ("mon", "external", ("ext-a.example.com",)), ("mon", "external-2", ("ext-b.example.com",)),
+            ("mon", "mine", ("mine.example.com",)), ("other", "grafana", ("elsewhere.example.com",))]
+        assert next(b for b in out if b.service == "claude-otel-grafana").port == 3001  # the chosen Service's port
 
 
 def test_group_backends_merges_hosts_of_one_service():
@@ -151,7 +193,7 @@ class Cluster:
         self.images = ["img:1"]
         monkeypatch.setattr(controller, "discover", lambda cfg: [
             _ep("good1.example.com"), _ep("good2.example.com"), _ep("bad.example.com", "b")])
-        monkeypatch.setattr(controller, "backend_images", lambda b: self.images)
+        monkeypatch.setattr(controller, "backend_workload", lambda b: ((), self.images))
         monkeypatch.setattr(controller, "describe", self._describe)
         monkeypatch.setattr(controller, "name_namespace", self._ns)
         monkeypatch.setattr(controller, "auth_hint", self._hint)
@@ -209,6 +251,18 @@ def test_reconcile_caches_backs_off_and_merges_hosts(monkeypatch):
     c.images = ["img:2"]  # a release
     c.run(*ALL)
     assert ("good1.example.com", "good2.example.com") in c.calls[3:]  # relabelled; the namespace title is a hit
+
+
+def test_two_services_for_one_workload_are_one_card_and_one_agent_run(monkeypatch):
+    c = Cluster(monkeypatch)
+    monkeypatch.setattr(controller, "discover", lambda cfg: [
+        _ep("a.example.com", "grafana"), _ep("b.example.com", "grafana-alt")])
+    monkeypatch.setattr(controller, "backend_workload", lambda b: ((("app", "grafana"),), ["img:1"]))
+    c.run("a.example.com", "b.example.com")
+    assert [x for x in c.calls if x[0] != "ns"] == [("a.example.com", "b.example.com")]
+    items = yaml.safe_load(c.published[0]["config.yml"])["services"][0]["items"]
+    assert len(items) == 1
+    assert [q["name"] for q in items[0]["quick"]] == ["a", "Swagger"]  # the other host, then the API docs
 
 
 def test_default_deny_publishes_nothing_and_lists_everything_as_pending(monkeypatch):

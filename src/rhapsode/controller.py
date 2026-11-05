@@ -13,7 +13,7 @@ from . import homer
 from .agent import describe, name_namespace
 from .approval import auth_hint
 from .config import Config
-from .discovery import Backend, backend_images, discover, group_backends
+from .discovery import Backend, backend_workload, discover, group_backends, merge_by_workload
 
 log = logging.getLogger("rhapsode")
 
@@ -76,7 +76,8 @@ async def reconcile(cfg: Config) -> None:
     endpoints = await asyncio.to_thread(discover, cfg)
     backends = group_backends(endpoints)
     for b in backends:
-        b.images = await asyncio.to_thread(backend_images, b)
+        b.selector, b.images = await asyncio.to_thread(backend_workload, b)
+    backends = merge_by_workload(backends)
     cache = await asyncio.to_thread(homer.load_cache, cfg)
     hosts = {e.host for e in endpoints}
     sem = asyncio.Semaphore(cfg.agent_concurrency)
