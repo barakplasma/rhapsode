@@ -49,11 +49,12 @@ jobs:
           echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  kubeconform.tgz" | sha256sum -c -
           sudo tar xzf kubeconform.tgz -C /usr/local/bin kubeconform
       - run: helm lint --strict charts/rhapsode
-      # default values, and with every optional branch on
+      # defaults (trusted-ca created), an existing CA ConfigMap with every other option on, and CA off
       - run: |
           helm template t charts/rhapsode -n homer | kubeconform -strict -summary -
+          helm template t charts/rhapsode -n homer --set trustedCA.enabled=false | kubeconform -strict -summary -
           helm template t charts/rhapsode -n rhapsode --set homerNamespace=homer \
-            --set trustedCA.configMap=trusted-ca --set trustedCA.create=true \
+            --set trustedCA.existingConfigMap=trusted-ca \
             --set-json 'extraEnv=[{"name":"X","valueFrom":{"secretKeyRef":{"name":"s","key":"k"}}}]' \
             | kubeconform -strict -summary -
 

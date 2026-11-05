@@ -28,14 +28,14 @@ baseConfig: |
   icon: "fas fa-house"
   columns: "auto"
 
-# Extra CA certificates (e.g. a private GitLab, a TLS-inspecting proxy, Bedrock via a proxy).
-# Point at a ConfigMap holding a PEM bundle. It is appended to the public roots, so a
-# bundle with only your CA is fine. With create: true the chart creates the ConfigMap empty
-# and labels it for OpenShift's trusted-CA injection (config.openshift.io/inject-trusted-cabundle).
+# Extra CA certificates (private GitLab, TLS-inspecting proxy, ...), appended to the public roots.
+# By default the chart creates ConfigMap <release>-trusted-ca labelled for OpenShift's trusted-CA
+# injection (config.openshift.io/inject-trusted-cabundle), which fills key ca-bundle.crt with the
+# cluster trust bundle. Elsewhere it stays empty, and only the public roots are used.
 trustedCA:
-  configMap: ""      # e.g. trusted-ca
+  enabled: true
+  existingConfigMap: ""   # use this ConfigMap instead of creating one; any PEM bundle under `key`
   key: ca-bundle.crt
-  create: false
 
 serviceAccount:
   annotations: {}    # e.g. eks.amazonaws.com/role-arn for Bedrock via IRSA

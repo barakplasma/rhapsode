@@ -1,4 +1,4 @@
-{{- $ca := .Values.trustedCA.configMap -}}
+{{- $ca := .Values.trustedCA.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,11 +22,15 @@ spec:
       initContainers:
         - name: ca-bundle
           {{- include "rhapsode.image" . | nindent 10 }}
-          command: [sh, -c, 'cat "$(python -c "import certifi; print(certifi.where())")" /ca/extra.pem > /tmp/ca-bundle.pem']
+          # The key may be missing (no injection off OpenShift): then only the public roots.
+          # shortcut: merged once at pod start, so a rotated cluster bundle needs a pod restart
+          command: [sh, -c, 'cat "$(python -c "import certifi; print(certifi.where())")" > /tmp/ca-bundle.pem && if [ -f "/ca/$KEY" ]; then cat "/ca/$KEY" >> /tmp/ca-bundle.pem; fi']
+          env:
+            - {name: KEY, value: {{ .Values.trustedCA.key | quote }}}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
-            - {name: ca, mountPath: /ca/extra.pem, subPath: {{ .Values.trustedCA.key }}}
+            - {name: ca, mountPath: /ca, readOnly: true}
       {{- end }}
       containers:
         - name: rhapsode
@@ -56,7 +60,7 @@ spec:
           emptyDir: {}
         {{- if $ca }}
         - name: ca
-          configMap: {name: {{ $ca }}}
+          configMap: {name: {{ include "rhapsode.caConfigMap" . }}}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}

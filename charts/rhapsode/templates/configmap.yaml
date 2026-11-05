@@ -6,13 +6,13 @@ metadata:
 data:
   base.yml: |
     {{- .Values.baseConfig | nindent 4 }}
-{{- if and .Values.trustedCA.configMap .Values.trustedCA.create }}
+{{- if and .Values.trustedCA.enabled (not .Values.trustedCA.existingConfigMap) }}
 ---
-# Filled by OpenShift's cluster network operator; never by Helm.
+# OpenShift's cluster network operator fills data; the chart never sets it, so upgrades keep it.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Values.trustedCA.configMap }}
+  name: {{ include "rhapsode.caConfigMap" . }}
   labels:
     {{- include "rhapsode.labels" . | nindent 4 }}
     config.openshift.io/inject-trusted-cabundle: "true"

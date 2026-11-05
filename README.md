@@ -76,7 +76,7 @@ extraEnv:
 Every option is in [`charts/rhapsode/values.yaml`](charts/rhapsode/values.yaml). Among them:
 
 - `homerNamespace`: install rhapsode somewhere other than Homer's namespace.
-- `trustedCA`: extra CA certificates for a private GitLab or a TLS-inspecting proxy. The CAs come from a ConfigMap, are appended to the public roots, and are used by both the Python side and the bundled CLI. `create: true` creates an OpenShift `trusted-ca` ConfigMap with the injection label.
+- `trustedCA` (on by default): the chart creates ConfigMap `<release>-trusted-ca` with OpenShift's `config.openshift.io/inject-trusted-cabundle` label. The cluster trust bundle is appended to the public roots and used by both the Python side and the bundled CLI. Off OpenShift the ConfigMap stays empty and only the public roots are used. `existingConfigMap` uses your own PEM bundle instead.
 - `serviceAccount.annotations`: for IRSA with Bedrock.
 
 ### CI
