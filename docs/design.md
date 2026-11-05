@@ -25,10 +25,8 @@ gives `chhoto` and `ghcr.io/sintan1729/chhoto-url`. The agent turns that into
 flowchart LR
   subgraph cluster
     K[(k8s API)]
-    subgraph ns_rhapsode["ns: rhapsode"]
-      R[rhapsode Deployment]
-    end
     subgraph ns_homer["ns: homer"]
+      R[rhapsode Deployment]
       CM1[ConfigMap homer-config<br/>written by rhapsode]
       CM2[ConfigMap rhapsode-cache]
       CM0[ConfigMap homer-bootstrap<br/>static, from git]
@@ -170,14 +168,18 @@ setup has two layers:
 
 `externalConfig` replaces the config rather than merging into it, so rhapsode
 writes a complete file: the base file `/config/base.yml` (ConfigMap
-`homer-base` in rhapsode's namespace) plus the `services` it generates.
+`homer-base`) plus the `services` it generates.
+
+rhapsode runs in the `homer` namespace, next to the ConfigMaps it writes. Its
+write access is then one namespaced Role, limited by `resourceNames` to
+`homer-config` and `rhapsode-cache`. `create` can't be limited by name.
 rhapsode writes it only when the content changed.
 
 ## Security
 
 - **RBAC.** Cluster-wide `get, list` on Services, Pods, Ingresses and
-  HTTPRoutes, plus `get` on Argo CD Applications. Write access only to
-  ConfigMaps in the `homer` namespace, through a Role. No Secrets.
+  HTTPRoutes, plus `get` on Argo CD Applications. Write access only to its two
+  ConfigMaps in `homer`. No Secrets.
 - **Prompt injection.** Every tool result is data an outsider may have written
   (a README, a page title). The worst case is a bad label, because:
   - the model can't reach anything beyond the four tools;
