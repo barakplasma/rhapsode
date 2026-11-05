@@ -63,19 +63,37 @@ spec:
       serviceAccountName: rhapsode
       containers:
         - name: app
-          image: ghcr.io/barakplasma/rhapsode:latest
+          image: ghcr.io/barakplasma/rhapsode:latest  # pin sha-<7> in production
           env:
             # --- pick ONE auth mode ---
             - name: ANTHROPIC_API_KEY            # API key mode
               valueFrom: {secretKeyRef: {name: rhapsode, key: anthropic-api-key, optional: true}}
+            # OpenRouter mode: ANTHROPIC_BASE_URL=https://openrouter.ai/api, ANTHROPIC_AUTH_TOKEN=<key>,
+            # ANTHROPIC_API_KEY="" (must be empty), AGENT_MODEL=anthropic/claude-haiku-5.5
             # - {name: CLAUDE_CODE_USE_BEDROCK, value: "1"}   # Bedrock mode: also set AWS_REGION and
             # - {name: AWS_REGION, value: eu-central-1}       # credentials (secret env vars or IRSA)
             # - {name: AGENT_MODEL, value: "<bedrock inference profile id>"}
             - {name: GITLAB_URL, value: "https://gitlab.example.com"}
             - name: GITLAB_TOKEN
               valueFrom: {secretKeyRef: {name: rhapsode, key: gitlab-token, optional: true}}
-          volumeMounts: [{name: base, mountPath: /config}]
+            - name: GITHUB_TOKEN                 # only for private GitHub repos
+              valueFrom: {secretKeyRef: {name: rhapsode, key: github-token, optional: true}}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+          volumeMounts: [{name: base, mountPath: /config}, {name: tmp, mountPath: /tmp}]
           resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {memory: 768Mi}}
-      volumes: [{name: base, configMap: {name: homer-base}}]
-# In Homer's own Deployment, mount ConfigMap `homer-config` (key config.yml) at /www/assets/config.yml via subPath
-# (note: subPath mounts don't live-update; mount the whole dir or restart Homer, see README).
+      volumes: [{name: base, configMap: {name: homer-base}}, {name: tmp, emptyDir: {}}]
+---
+# Homer reads assets/config.yml; this one only points it at the live-updating directory mount below.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: homer-bootstrap, namespace: homer}
+data:
+  config.yml: |
+    externalConfig: assets/rhapsode/config.yml
+# In Homer's Deployment:
+#   volumeMounts:
+#     - {name: bootstrap, mountPath: /www/assets/config.yml, subPath: config.yml}  # static, subPath is fine
+#     - {name: generated, mountPath: /www/assets/rhapsode}                         # dir mount: updates live
+#   volumes:
+#     - {name: bootstrap, configMap: {name: homer-bootstrap}}
+#     - {name: generated, configMap: {name: homer-config, optional: true}}

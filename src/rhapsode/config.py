@@ -16,6 +16,8 @@ class Config:
     exclude_host_suffixes: list[str] = field(
         default_factory=lambda: _list("EXCLUDE_HOST_SUFFIXES", ".svc,.local,.internal,.cluster.local")
     )
+    # TLS terminated upstream (e.g. Cloudflare Tunnel): label every URL https
+    force_https: bool = os.environ.get("FORCE_HTTPS", "false").lower() == "true"
     # --- output
     homer_namespace: str = os.environ.get("HOMER_NAMESPACE", "homer")
     homer_configmap: str = os.environ.get("HOMER_CONFIGMAP", "homer-config")
@@ -26,12 +28,17 @@ class Config:
     interval_s: int = int(os.environ.get("RECONCILE_INTERVAL_S", "60"))
     agent_concurrency: int = int(os.environ.get("AGENT_CONCURRENCY", "3"))
     max_turns: int = int(os.environ.get("AGENT_MAX_TURNS", "8"))
+    max_budget_usd: float = float(os.environ.get("AGENT_MAX_BUDGET_USD", "0.05"))
+    agent_timeout_s: int = int(os.environ.get("AGENT_TIMEOUT_S", "180"))
+    failure_backoff_s: int = int(os.environ.get("FAILURE_BACKOFF_S", "1800"))
     # --- enrichment sources
     argocd_namespace: str = os.environ.get("ARGOCD_NAMESPACE", "argocd")
     gitlab_url: str = os.environ.get("GITLAB_URL", "").rstrip("/")
     gitlab_token: str = os.environ.get("GITLAB_TOKEN", "")
+    github_token: str = os.environ.get("GITHUB_TOKEN", "")  # optional; needed for private repos
     probe_verify_tls: bool = os.environ.get("PROBE_VERIFY_TLS", "true").lower() != "false"
     # --- LLM. Auth is picked up by the SDK from env:
-    #   API key : ANTHROPIC_API_KEY
+    #   API key   : ANTHROPIC_API_KEY
+    #   OpenRouter: ANTHROPIC_BASE_URL=https://openrouter.ai/api + ANTHROPIC_AUTH_TOKEN + ANTHROPIC_API_KEY=""
     #   Bedrock : CLAUDE_CODE_USE_BEDROCK=1 + AWS_REGION + AWS creds (or IRSA/instance role)
     model: str = os.environ.get("AGENT_MODEL", "")  # Bedrock needs an inference-profile id here

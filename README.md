@@ -1,54 +1,75 @@
 # rhapsode
 
-Controller that fills [Homer](https://github.com/bastienwirtz/homer) with every public Ingress / Gateway API HTTPRoute in your cluster. A Claude Agent SDK agent works out what each URL powers before it is listed.
+Fills your [Homer](https://github.com/bastienwirtz/homer) dashboard with every public Kubernetes Ingress and Gateway API HTTPRoute. A Claude Agent SDK agent works out what each URL powers before it is listed.
+
+Design, trade-offs and security model: [docs/design.md](docs/design.md).
 
 ```mermaid
 flowchart LR
   K[(k8s API)] -->|Ingress, HTTPRoute| D[discovery]
   D --> C{cached?}
-  C -- no --> A[Agent SDK run]
-  A <-->|tools| T[get_workload / get_argocd_app / get_gitlab_project / probe_url]
+  C -- no --> A[agent run]
+  A <-->|tools| T[get_workload / get_argocd_app / get_repo / probe_url]
   T <--> K
-  T <--> G[GitLab]
+  T <--> G[GitHub / GitLab]
   T <--> U[the URL itself]
   C -- yes --> R[render config.yml]
   A --> R
   R -->|ConfigMap homer-config| H[Homer]
-  A -->|result| CA[(cache ConfigMap)]
+  A -->|label| CA[(ConfigMap rhapsode-cache)]
 ```
 
 ## How it works
 
-- Every `RECONCILE_INTERVAL_S` (default 60) it lists Ingresses and HTTPRoutes. It polls instead of watching, which is simpler and fast enough for a dashboard.
-- Each endpoint gets one short agent run, only when its host, backend, namespace or annotations changed. Results are cached in the `rhapsode-cache` ConfigMap, so steady state costs zero LLM calls.
-- The agent only has four tools (no shell, no file access): backend workload info, the ArgoCD Application, the GitLab repo description/README, and a GET on the URL. The probe refuses any host that was not discovered from the cluster, and does not follow redirects.
-- Output goes to ConfigMap `homer-config` (`config.yml`), merged over `/config/base.yml` (ConfigMap `homer-base`).
+- Every `RECONCILE_INTERVAL_S` (default 60) it lists Ingresses and HTTPRoutes.
+- An endpoint gets one short agent run only when its host, backend, namespace or annotations change. Labels are cached in a ConfigMap, so in steady state there are no LLM calls. A failed run gets a fallback label and is retried after `FAILURE_BACKOFF_S` (default 30 min).
+- The agent has no built-in tools: no shell, no files, no web. It has four tools of its own:
+  - `get_workload`: backend Service and pod info.
+  - `get_argocd_app`: the Argo CD Application.
+  - `get_repo`: a GitHub or GitLab repo's description plus its README or one file.
+  - `probe_url`: a GET on the URL. It only works on discovered hosts and does not follow redirects.
+- Output is a structured JSON label. It is still validated: lengths are clamped, and `icon` and `category` must come from an allowlist. The URL never comes from the model.
+- The result goes to ConfigMap `homer-config` (`config.yml`), built on top of `/config/base.yml`. Mount it in Homer as a directory at `/www/assets/rhapsode/`, plus a static `config.yml` containing `externalConfig: assets/rhapsode/config.yml`. Directory mounts update live. `subPath` mounts do not. See `deploy/manifests.yaml`.
 
 ## "Public" means
 
-Has a real, non-wildcard hostname, is not in `EXCLUDE_NAMESPACES`, does not end in `EXCLUDE_HOST_SUFFIXES`, and matches `PUBLIC_INGRESS_CLASSES` if you set it (e.g. `traefik-public`). Override per resource with the annotation `rhapsode/ignore: "true"|"false"`.
+The host is a real, non-wildcard hostname. Its namespace is not in `EXCLUDE_NAMESPACES`. It does not end in one of `EXCLUDE_HOST_SUFFIXES`. If `PUBLIC_INGRESS_CLASSES` is set (e.g. `cloudflare-tunnel`), its ingress class is in that list. Override per resource with the annotation `rhapsode/ignore: "true"|"false"`.
 
 ## LLM auth
 
 | Mode | Env |
 |------|-----|
-| API key | `ANTHROPIC_API_KEY` |
+| Anthropic API key | `ANTHROPIC_API_KEY` |
+| OpenRouter | `ANTHROPIC_BASE_URL=https://openrouter.ai/api`, `ANTHROPIC_AUTH_TOKEN=<key>`, `ANTHROPIC_API_KEY=""`, `AGENT_MODEL=anthropic/claude-haiku-5.5` |
 | Bedrock | `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION`, AWS credentials, `AGENT_MODEL=<inference profile id>` |
 
 ## Run
 
 ```bash
-# local dry run against your kubeconfig
-pip install -e .
-OUTPUT_PATH=./config.yml ANTHROPIC_API_KEY=... rhapsode --once
+pip install -e '.[test]'
+pytest -q tests
 
-# in k3s
-docker buildx build --platform linux/arm64 -t ghcr.io/<you>/rhapsode . --push
-kubectl apply -f deploy/manifests.yaml
+# local dry run against your kubeconfig
+OUTPUT_PATH=./config.yml ANTHROPIC_API_KEY=... rhapsode --once
 ```
 
-Homer side: mount the `homer-config` ConfigMap as a directory (not `subPath`) over `/www/assets`-style config path, or restart Homer after changes, because `subPath` mounts do not update live.
+CI (`.github/workflows/ci.yml`) runs ruff and pytest on every PR and builds the image for `linux/amd64` and `linux/arm64`. On `main` it pushes `ghcr.io/barakplasma/rhapsode:sha-<7>` and `:latest`. On `v*` tags it pushes semver tags. Each image carries SBOM and provenance attestations.
 
 ## Config env vars
 
-`PUBLIC_INGRESS_CLASSES`, `EXCLUDE_NAMESPACES`, `EXCLUDE_HOST_SUFFIXES`, `HOMER_NAMESPACE`, `HOMER_CONFIGMAP`, `HOMER_BASE_CONFIG`, `OUTPUT_PATH`, `RECONCILE_INTERVAL_S`, `AGENT_CONCURRENCY`, `AGENT_MAX_TURNS`, `ARGOCD_NAMESPACE`, `GITLAB_URL`, `GITLAB_TOKEN`, `PROBE_VERIFY_TLS`, `AGENT_MODEL`.
+| Var | Default |
+|---|---|
+| `PUBLIC_INGRESS_CLASSES` | empty (any class) |
+| `EXCLUDE_NAMESPACES` | `kube-system` |
+| `EXCLUDE_HOST_SUFFIXES` | `.svc,.local,.internal,.cluster.local` |
+| `FORCE_HTTPS` | `false`. Set it when TLS ends upstream (e.g. Cloudflare Tunnel) |
+| `HOMER_NAMESPACE`, `HOMER_CONFIGMAP`, `CACHE_CONFIGMAP` | `homer`, `homer-config`, `rhapsode-cache` |
+| `HOMER_BASE_CONFIG` | `/config/base.yml` |
+| `OUTPUT_PATH` | empty. Set it to write a file instead of the ConfigMap |
+| `RECONCILE_INTERVAL_S`, `FAILURE_BACKOFF_S` | `60`, `1800` |
+| `AGENT_CONCURRENCY`, `AGENT_MAX_TURNS`, `AGENT_MAX_BUDGET_USD`, `AGENT_TIMEOUT_S` | `3`, `8`, `0.05`, `180` |
+| `AGENT_MODEL` | SDK default |
+| `ARGOCD_NAMESPACE` | `argocd` |
+| `GITHUB_TOKEN` | empty. Needed only for private repos |
+| `GITLAB_URL`, `GITLAB_TOKEN` | empty |
+| `PROBE_VERIFY_TLS` | `true` |

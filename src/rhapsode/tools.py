@@ -17,6 +17,47 @@ def _txt(obj) -> dict:
     return {"content": [{"type": "text", "text": s[:MAX]}]}
 
 
+def repo_target(cfg: Config, repo_url: str, path: str) -> tuple[str, str, str] | str:
+    """Map a repo URL to (forge, api base, file path), or an error string. Fixed host list, no traversal."""
+    u = urlparse(repo_url if "://" in repo_url else f"https://{repo_url}")
+    repo = u.path.split("/-/")[0].strip("/").removesuffix(".git")  # GitLab puts tree/blob after /-/
+    path = path.strip("/")
+    if ".." in path.split("/") or repo.count("/") < 1:
+        return "refused: bad repo url or path"
+    if u.hostname == "github.com":
+        owner_repo = "/".join(repo.split("/")[:2])
+        return "github", f"https://api.github.com/repos/{owner_repo}", path
+    gl = urlparse(cfg.gitlab_url).hostname if cfg.gitlab_url else None
+    if gl and u.hostname == gl:
+        return "gitlab", f"{cfg.gitlab_url}/api/v4/projects/{quote(repo, safe='')}", path
+    return "refused: only github.com" + (f" and {gl}" if gl else "") + " repos"
+
+
+async def fetch_repo(cfg: Config, repo_url: str, path: str) -> dict | str:
+    t = repo_target(cfg, repo_url, path)
+    if isinstance(t, str):
+        return t
+    forge, api, path = t
+    if forge == "github":
+        hdr = {"Accept": "application/vnd.github+json"}
+        if cfg.github_token:
+            hdr["Authorization"] = f"Bearer {cfg.github_token}"
+        file_url = f"{api}/contents/{quote(path)}" if path else f"{api}/readme"
+        file_hdr = {"Accept": "application/vnd.github.raw+json"}
+    else:
+        hdr = {"PRIVATE-TOKEN": cfg.gitlab_token} if cfg.gitlab_token else {}
+        file_url = f"{api}/repository/files/{quote(path or 'README.md', safe='')}/raw"
+        file_hdr = {}
+    async with httpx.AsyncClient(timeout=10, headers=hdr) as c:
+        p = await c.get(api)
+        if p.status_code != 200:
+            return f"{forge} {p.status_code}"
+        f = await c.get(file_url, headers=file_hdr, params={} if forge == "github" else {"ref": "HEAD"})
+    meta = p.json()
+    return {"description": meta.get("description"), "topics": meta.get("topics"),
+            "file": path or "README", "content": f.text[:2000] if f.status_code == 200 else f"({f.status_code})"}
+
+
 def build_server(cfg: Config, allowed_hosts: set[str]):
     @tool("get_workload", "Images, ports and labels of the pods behind a Service.", {"namespace": str, "service": str})
     async def get_workload(args):
@@ -30,7 +71,9 @@ def build_server(cfg: Config, allowed_hosts: set[str]):
         pod = pods[0] if pods else None
         return _txt({
             "service_labels": svc.metadata.labels,
-            "service_annotations": {k: v for k, v in (svc.metadata.annotations or {}).items() if "last-applied" not in k},
+            "service_annotations": {
+                k: v for k, v in (svc.metadata.annotations or {}).items() if "last-applied" not in k
+            },
             "ports": [p.port for p in svc.spec.ports or []],
             "images": [c.image for c in pod.spec.containers] if pod else [],
             "pod_labels": pod.metadata.labels if pod else {},
@@ -48,20 +91,17 @@ def build_server(cfg: Config, allowed_hosts: set[str]):
         srcs = spec.get("sources") or [spec.get("source", {})]
         return _txt({"project": spec.get("project"), "sources": srcs, "dest": spec.get("destination")})
 
-    @tool("get_gitlab_project", "Description and README excerpt of a GitLab repo given its URL.", {"repo_url": str})
-    async def get_gitlab_project(args):
-        if not cfg.gitlab_url or not args["repo_url"].startswith(cfg.gitlab_url):
-            return _txt("repo is not on the configured GitLab")
-        path = urlparse(args["repo_url"]).path.strip("/").removesuffix(".git")
-        hdr = {"PRIVATE-TOKEN": cfg.gitlab_token} if cfg.gitlab_token else {}
-        api = f"{cfg.gitlab_url}/api/v4/projects/{quote(path, safe='')}"
-        async with httpx.AsyncClient(timeout=10, headers=hdr) as c:
-            p = await c.get(api)
-            if p.status_code != 200:
-                return _txt(f"gitlab {p.status_code}")
-            readme = await c.get(f"{api}/repository/files/README.md/raw", params={"ref": "HEAD"})
-        return _txt({"description": p.json().get("description"), "topics": p.json().get("topics"),
-                     "readme": readme.text[:1500] if readme.status_code == 200 else ""})
+    @tool(
+        "get_repo",
+        "Description, topics and one file (README by default) of a GitHub or GitLab repo. "
+        "path is a file in the repo (e.g. apps/chhoto/values.yaml), or empty for the README.",
+        {"repo_url": str, "path": str},
+    )
+    async def get_repo(args):
+        try:
+            return _txt(await fetch_repo(cfg, args["repo_url"], args.get("path") or ""))
+        except httpx.HTTPError as e:
+            return _txt(f"unreachable: {type(e).__name__}")
 
     @tool("probe_url", "GET one of the discovered URLs; returns status, title and a text snippet.", {"url": str})
     async def probe_url(args):
@@ -76,9 +116,10 @@ def build_server(cfg: Config, allowed_hosts: set[str]):
         body = r.text[:20000]
         title = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
         text = re.sub(r"<(script|style).*?</\1>|<[^>]+>", " ", body, flags=re.S | re.I)
-        return _txt({"status": r.status_code, "redirect_to": r.headers.get("location"), "server": r.headers.get("server"),
+        return _txt({"status": r.status_code, "redirect_to": r.headers.get("location"),
+                     "server": r.headers.get("server"),
                      "title": title.group(1).strip() if title else None,
                      "text": re.sub(r"\s+", " ", text)[:800]})
 
-    server = create_sdk_mcp_server("disc", tools=[get_workload, get_argocd_app, get_gitlab_project, probe_url])
-    return server, [f"mcp__disc__{t}" for t in ("get_workload", "get_argocd_app", "get_gitlab_project", "probe_url")]
+    server = create_sdk_mcp_server("disc", tools=[get_workload, get_argocd_app, get_repo, probe_url])
+    return server, [f"mcp__disc__{t}" for t in ("get_workload", "get_argocd_app", "get_repo", "probe_url")]

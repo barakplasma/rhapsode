@@ -1,5 +1,5 @@
 """Find public Ingress and Gateway API HTTPRoute endpoints."""
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 from kubernetes import client
 
@@ -54,7 +54,7 @@ def discover(cfg: Config) -> list[Endpoint]:
             # prefer the "/" backend; otherwise the first one
             pick = next((p for p in paths if p.path in (None, "/")), paths[0] if paths else None)
             svc = pick.backend.service.name if pick and pick.backend.service else ""
-            scheme = "https" if rule.host in tls_hosts else "http"
+            scheme = "https" if cfg.force_https or rule.host in tls_hosts else "http"
             found.setdefault(
                 rule.host,
                 Endpoint(f"{scheme}://{rule.host}", rule.host, f"Ingress {ns}/{name}", ns, svc, ann),
@@ -72,7 +72,7 @@ def discover(cfg: Config) -> list[Endpoint]:
     for r in routes:
         meta = r["metadata"]
         ns, name = meta["namespace"], meta["name"]
-        ann = {k: v for k, v in meta.get("annotations", {}).items() if not k.startswith("kubectl.")}
+        ann = {k: v for k, v in (meta.get("annotations") or {}).items() if not k.startswith("kubectl.")}
         refs = [b["name"] for rule in r["spec"].get("rules", []) for b in rule.get("backendRefs", [])]
         for host in r["spec"].get("hostnames", []):
             if _public(cfg, host, ns, ann, None):
