@@ -115,6 +115,15 @@ def publish(cfg: Config, files: dict[str, str]) -> None:
         _upsert_cm(cfg.homer_namespace, cfg.homer_configmap, files)
 
 
+def publish_pending(cfg: Config, yml: str) -> None:
+    """The pending list is for the operator (kubectl), never for Homer: Homer's pages are public."""
+    if cfg.output_path:
+        with open(os.path.join(os.path.dirname(cfg.output_path), "pending.yaml"), "w") as f:
+            f.write(yml)
+    else:
+        _upsert_cm(cfg.homer_namespace, cfg.pending_configmap, {"pending.yaml": yml})
+
+
 def load_cache(cfg: Config) -> dict[str, str]:
     try:
         cm = client.CoreV1Api().read_namespaced_config_map(cfg.cache_configmap, cfg.homer_namespace)

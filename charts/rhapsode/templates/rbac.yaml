@@ -46,7 +46,10 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [configmaps]
-    resourceNames: [{{ .Values.config.HOMER_CONFIGMAP | default "homer-config" }}, {{ .Values.config.CACHE_CONFIGMAP | default "rhapsode-cache" }}]
+    resourceNames:
+      - {{ .Values.config.HOMER_CONFIGMAP | default "homer-config" }}
+      - {{ .Values.config.CACHE_CONFIGMAP | default "rhapsode-cache" }}
+      - {{ .Values.config.PENDING_CONFIGMAP | default "rhapsode-pending" }}
     verbs: [get, update]
   - apiGroups: [""]
     resources: [configmaps]

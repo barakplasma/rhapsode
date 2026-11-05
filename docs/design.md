@@ -85,6 +85,13 @@ one **backend**: one agent run, one Homer card. Three hostnames for one Grafana
 become one card, and the extra hostnames become link pills on it. A route with
 no Service is a backend of its own.
 
+Two *Services* can still front the same pods (a second Service or Ingress added
+for the same Grafana). So backends in one namespace whose Services have the
+same pod selector are merged too, keeping the alphabetically first Service
+name so the cache key is stable. A Service with no selector (ExternalName, or
+hand-managed endpoints) is never merged, so those stay separate cards, told
+apart by the host suffix when their names collide.
+
 | Source | Backend | Scheme |
 |---|---|---|
 | `networking.k8s.io/v1` Ingress | the `/` path's Service, else the first path | `https` if the host is in `spec.tls`, else `http` |
@@ -100,8 +107,67 @@ On this cluster TLS ends at Cloudflare, so the tunnel Ingresses have no
 - the hostname does not end in `EXCLUDE_HOST_SUFFIXES`;
 - the class is in `PUBLIC_INGRESS_CLASSES`, if set (`cloudflare-tunnel` here).
 
-The annotation `rhapsode/ignore: "true"` hides a resource and `"false"` forces
-it in. The annotation is the escape hatch, so the rules can stay simple.
+The annotation `rhapsode/ignore: "true"` drops a resource from discovery
+entirely (it is not even listed as pending), and `"false"` makes it a
+candidate. A candidate is not published until it is approved (next section).
+The annotation is the escape hatch, so the rules can stay simple.
+
+## Approval
+
+"Public" is a guess made from cluster metadata. An Ingress for an admin UI, a
+webhook or a service with no login of its own passes every rule above, and
+the dashboard would then publish it. So discovery only finds **candidates**,
+and nothing is published until a person approves its hostname.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Candidate: discovered (public by the rules above)
+  Candidate --> Pending: not in approvedHosts
+  Pending --> Approved: hostname added to approvedHosts
+  Approved --> Published: on the dashboard
+  Approved --> Pending: hostname removed
+  Candidate --> [*]: rhapsode/ignore "true"
+```
+
+- **Where approvals live:** the chart value `approvedHosts`, a list of exact
+  hostnames (case-insensitive). In this homelab that is one list in
+  `apps/rhapsode/values.yaml`, so every approval is a reviewed line in a pull
+  request, and Argo CD applies it. Annotations on the Ingresses would be
+  scattered across every app, and `charts/common` has no annotations field.
+- **Default-deny:** an empty list publishes nothing. No wildcards: one would
+  approve every future Ingress on that domain, which defeats the gate.
+- **Per hostname, not per Service.** A backend with three hostnames gets a
+  card from its approved hostnames only. An unapproved alias is not a pill and
+  not a link target, and the agent's preferred primary host is replaced by the
+  first approved one if it is not approved.
+- **The pending list** is ConfigMap `rhapsode-pending` (key `pending.yaml`,
+  sorted by hostname) and a log line whenever it changes. Each entry has the
+  hostname, namespace, Service, container images, the agent's suggested label,
+  and an `auth` hint. It is read with `kubectl`; it is deliberately not a
+  Homer page, because Homer's pages are public and a pending list would
+  publish exactly what the gate holds back.
+- **The `auth` hint** comes from one unauthenticated GET to the public URL,
+  without following redirects, cached for an hour:
+
+  | `auth` | Meaning |
+  |---|---|
+  | `cloudflare-access` | redirected to Cloudflare Access |
+  | `401`, `403` | the host refuses anonymous requests |
+  | `login-redirect` | redirected to a path or host that looks like a login |
+  | `no-auth-seen` | answered without asking for a login |
+  | `unreachable` | no answer (not cached) |
+
+  `no-auth-seen` is a signal to look closer, not proof: a login form rendered
+  in place at a `200` looks the same.
+- **The agent still runs for pending hosts**, so the list can show a suggested
+  label. The cost is that details about a service you may not want public (its
+  images, its repo README, a page snippet) are sent to the LLM provider. To
+  avoid that, run the agent only for approved hosts. The pending list would
+  then lack suggestions. This was a choice, not an oversight.
+- **Namespace titles** are generated from approved cards only, so the titles
+  of unapproved services never reach the dashboard through a group name.
+- **A failure to write the pending list** is logged and does not stop the
+  dashboard or cost the next loop its cache.
 
 ## The agent
 
@@ -133,6 +199,9 @@ docs of an API behind a login are the ones worth listing. The Homer link still
 goes to the public host (`<primary host><path>`), so a person goes through
 Access as usual.
 
+Each probe logs `api docs probe <ns>/<svc>:<port> -> [paths]` (or `none`), so
+"nothing found" can be told apart from "the agent never called it".
+
 The usual path here is: workload, then the Argo CD app (named after the
 namespace), then `get_repo` on `homelab-manifests` at `apps/<name>/values.yaml`.
 That file usually names the upstream repo in its first comment, and the agent
@@ -163,7 +232,10 @@ Treat it as untrusted, even with a schema:
 - `api_docs` keeps only paths that `find_api_docs` itself confirmed in the same
   run (at most 3), so the model cannot add a link;
 - `smart_card` must be on the allowlist (`Gatus`, `Olivetin`: cards that read a
-  status or a version and need no API key in the public config);
+  status or a version and need no API key in the public config) **and** a
+  container image behind the Service must contain the product's name. Without
+  the second check the model picked Gatus for a rehearsal chat app, which
+  broke its card; with no known image there is no smart card;
 - every URL is built from discovery plus a confirmed path, never taken from the
   model.
 
@@ -243,8 +315,9 @@ flowchart TD
 ## Security
 
 - **RBAC.** Cluster-wide `get, list` on Services, Pods, Ingresses and
-  HTTPRoutes, plus `get` on Argo CD Applications. Write access only to its two
-  ConfigMaps in `homer`. No Secrets.
+  HTTPRoutes, plus `get` on Argo CD Applications. Write access only to its three
+  ConfigMaps in `homer` (the Homer files, the cache, the pending list). No
+  Secrets.
 - **Prompt injection.** Every tool result is data an outsider may have written
   (a README, a page title). The worst case is a bad label, because:
   - the model can't reach anything beyond the five tools;
@@ -267,6 +340,9 @@ flowchart TD
   roots. Where the ConfigMap is missing, the pod still starts with the public
   roots. The bundle is merged at pod start, so a rotated cluster CA needs a pod
   restart.
+- **Accidental publication.** The approval gate (see Approval) keeps anything
+  not on `approvedHosts` out of every Homer file, including pills and group
+  titles. The LLM provider still sees pending hosts, as described there.
 - **Container.** Runs as non-root with a read-only root filesystem. `HOME=/tmp`
   is an `emptyDir`, because the bundled Claude Code CLI writes session files
   there.
@@ -312,10 +388,12 @@ flowchart LR
 
 1. A liveness probe. There is no HTTP server today. A heartbeat file plus an
    `exec` probe would catch a hung loop. Skipped until it happens.
-2. Should low-`confidence` labels stand out (`tagstyle: is-warning`) for a
+2. Stale approvals: an `approvedHosts` entry whose hostname no longer exists is
+   harmless but untidy. The pending ConfigMap could list them too.
+3. Should low-`confidence` labels stand out (`tagstyle: is-warning`) for a
    manual `rhapsode/ignore` or a re-run? Today they are listed as-is.
-3. A manual override annotation (`rhapsode/name`, `rhapsode/icon`) that skips the
+4. A manual override annotation (`rhapsode/name`, `rhapsode/icon`) that skips the
    agent entirely. Cheap to add once there is a real case for it.
-4. API docs of a Service exposed under a sub-path (an Ingress path other than
+5. API docs of a Service exposed under a sub-path (an Ingress path other than
    `/`) are linked on the host root, so the link would be wrong. No such
    Ingress exists here today. Carry the path prefix through when one appears.

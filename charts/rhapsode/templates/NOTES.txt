@@ -5,3 +5,8 @@ Wire Homer to it so updates show up live (subPath mounts never update):
      mounted with subPath at /www/assets/config.yml.
   2. ConfigMap {{ .Values.config.HOMER_CONFIGMAP | default "homer-config" }} mounted as a directory at /www/assets/rhapsode
      (optional: true, rhapsode creates it on its first pass).
+
+Approvals (default-deny): only hostnames in approvedHosts are published{{ if not .Values.approvedHosts }}. The list is empty, so the dashboard is empty{{ end }}.
+Hosts waiting for approval, with a suggested label and whether they look login-protected:
+  kubectl -n {{ include "rhapsode.homerNamespace" . }} get cm {{ .Values.config.PENDING_CONFIGMAP | default "rhapsode-pending" }} -o jsonpath='{.data.pending\.yaml}'
+Approve a host by adding it to approvedHosts and upgrading. The pending list is not on Homer, whose pages are public.

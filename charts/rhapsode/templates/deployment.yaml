@@ -36,6 +36,7 @@ spec:
           env:
             - {name: HOMER_NAMESPACE, value: {{ include "rhapsode.homerNamespace" . | quote }}}
             - {name: HOMER_BASE_CONFIG, value: /config/base.yml}
+            - {name: APPROVED_HOSTS, value: {{ .Values.approvedHosts | join "," | quote }}}
             {{- range $k, $v := .Values.config }}
             - {name: {{ $k }}, value: {{ $v | toString | quote }}}
             {{- end }}

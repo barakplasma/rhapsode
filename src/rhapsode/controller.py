@@ -1,23 +1,26 @@
-"""Reconcile loop: discover -> group by backend -> (LLM only for new/changed backends and namespaces) -> render
--> publish."""
+"""Reconcile loop: discover -> group by backend -> (LLM only for new/changed backends and namespaces) -> approval
+gate -> render -> publish."""
 import asyncio
 import hashlib
 import json
 import logging
 import time
 
+import yaml
 from kubernetes import config as kconfig
 
 from . import homer
 from .agent import describe, name_namespace
+from .approval import auth_hint
 from .config import Config
-from .discovery import Backend, backend_images, discover, group_backends
+from .discovery import Backend, backend_workload, discover, group_backends, merge_by_workload
 
 log = logging.getLogger("rhapsode")
 
 # cache key -> monotonic time of the last failed agent run; in memory, so a restart retries everything once
 _failed: dict[str, float] = {}
 _last_published: dict[str, str] | None = None
+_last_pending: str | None = None
 
 
 def _h(obj) -> str:
@@ -41,24 +44,40 @@ def _fallback(b: Backend) -> dict:
             "primary_host": e.host, "api_docs": [], "smart_card": ""}
 
 
-def card(b: Backend, info: dict) -> dict:
-    """Homer card for a backend: the agent's label at the primary host, other hosts and API docs as pills."""
-    primary = next((e for e in b.endpoints if e.host == info.get("primary_host")), b.endpoints[0])
+def card(b: Backend, info: dict, approved: set[str]) -> dict | None:
+    """Homer card for a backend, built only from its approved hosts (None if there are none): the agent's label at
+    the primary host, the other approved hosts and the API docs as pills."""
+    ok = [e for e in b.endpoints if e.host.lower() in approved]
+    if not ok:
+        return None
+    primary = next((e for e in ok if e.host == info.get("primary_host")), ok[0])
     url = primary.url.rstrip("/")
     # shortcut: docs are linked on the primary host's root, so a Service exposed under a sub-path links wrongly;
     # carry the Ingress path prefix through if that ever happens
     docs = [{"url": url + d["path"], "kind": d["kind"], "title": d.get("title", "")} for d in info.get("api_docs", [])]
     return {**{k: v for k, v in info.items() if k not in ("primary_host", "api_docs", "hide", "confidence")},
             "namespace": b.namespace, "host": primary.host, "url": primary.url,
-            "aliases": [(e.host, e.url) for e in b.endpoints if e is not primary], "api_docs": docs}
+            "aliases": [(e.host, e.url) for e in ok if e is not primary], "api_docs": docs}
+
+
+async def pending(cfg: Config, rows: list[tuple[Backend, dict]], approved: set[str]) -> list[dict]:
+    """Hosts waiting for approval, with the agent's suggested label and whether the host looks login-protected."""
+    todo = [(b, info, e) for b, info in rows if not info.get("hide")
+            for e in b.endpoints if e.host.lower() not in approved]
+    hints = await asyncio.gather(*(auth_hint(cfg, e.url) for _, _, e in todo))
+    return sorted(({"host": e.host, "namespace": b.namespace, "service": b.service, "images": b.images, "auth": h,
+                    "suggested": {k: info.get(k, "") for k in ("name", "subtitle", "category")}}
+                   for (b, info, e), h in zip(todo, hints, strict=True)), key=lambda r: r["host"])
 
 
 async def reconcile(cfg: Config) -> None:
-    global _last_published
+    global _last_published, _last_pending
+    approved = {h.lower() for h in cfg.approved_hosts}
     endpoints = await asyncio.to_thread(discover, cfg)
     backends = group_backends(endpoints)
     for b in backends:
-        b.images = await asyncio.to_thread(backend_images, b)
+        b.selector, b.images = await asyncio.to_thread(backend_workload, b)
+    backends = merge_by_workload(backends)
     cache = await asyncio.to_thread(homer.load_cache, cfg)
     hosts = {e.host for e in endpoints}
     sem = asyncio.Semaphore(cfg.agent_concurrency)
@@ -83,11 +102,12 @@ async def reconcile(cfg: Config) -> None:
         log.info("described %s -> %s", what, out.get("name") or out.get("title"))
         return out
 
-    async def one(b: Backend) -> dict | None:
-        info = await cached(_key(b), ",".join(b.hosts), lambda: describe(cfg, b, hosts), _fallback(b))
-        return None if info.get("hide") else card(b, info)
+    async def one(b: Backend) -> tuple[Backend, dict]:
+        # the agent runs for every backend, approved or not: the pending list needs its suggested label
+        return b, await cached(_key(b), ",".join(b.hosts), lambda: describe(cfg, b, hosts), _fallback(b))
 
-    cards = [c for c in await asyncio.gather(*(one(b) for b in backends)) if c]
+    rows = await asyncio.gather(*(one(b) for b in backends))
+    cards = [c for b, info in rows if not info.get("hide") and (c := card(b, info, approved))]
 
     by_ns: dict[str, list[dict]] = {}
     for c in cards:
@@ -102,9 +122,19 @@ async def reconcile(cfg: Config) -> None:
     if files != _last_published:
         await asyncio.to_thread(homer.publish, cfg, files)
         _last_published = files
-        log.info("published %d services in %d namespaces, %d pages", len(cards), len(by_ns), len(files))
+        log.info("published %d approved services in %d namespaces, %d pages", len(cards), len(by_ns), len(files))
     if new_cache != cache:
         await asyncio.to_thread(homer.save_cache, cfg, new_cache)
+
+    try:  # a failure here must not cost the next loop its agent runs, so it comes after the cache is saved
+        todo = await pending(cfg, rows, approved)
+        yml = yaml.safe_dump({"pending": todo}, sort_keys=False)
+        if yml != _last_pending:
+            await asyncio.to_thread(homer.publish_pending, cfg, yml)
+            _last_pending = yml
+            log.info("pending approval (%d): %s", len(todo), ", ".join(p["host"] for p in todo) or "-")
+    except Exception:
+        log.exception("could not publish the pending list")
 
 
 def load_kube() -> None:
