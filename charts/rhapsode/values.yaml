@@ -1,0 +1,58 @@
+image:
+  repository: ghcr.io/barakplasma/rhapsode
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+# Namespace of Homer's ConfigMaps (homer-config, rhapsode-cache).
+# Empty: the release namespace. The write Role lives there.
+homerNamespace: ""
+
+# Plain settings, rendered as env (see the README for every variable).
+config:
+  PUBLIC_INGRESS_CLASSES: ""
+  EXCLUDE_NAMESPACES: kube-system
+  FORCE_HTTPS: "false"
+  AGENT_MODEL: ""
+
+# Raw env entries, for Secrets. Pick one LLM backend:
+#   OpenRouter: ANTHROPIC_BASE_URL=https://openrouter.ai/api, ANTHROPIC_API_KEY="",
+#               ANTHROPIC_AUTH_TOKEN from a Secret, config.AGENT_MODEL=anthropic/claude-haiku-5.5
+#   Anthropic:  ANTHROPIC_API_KEY from a Secret
+#   Bedrock:    CLAUDE_CODE_USE_BEDROCK=1, AWS_REGION, AWS creds, config.AGENT_MODEL=<inference profile>
+extraEnv: []
+
+# Homer config that the generated services list is merged into.
+baseConfig: |
+  title: "Home"
+  subtitle: "Auto-discovered services"
+  icon: "fas fa-house"
+  columns: "auto"
+
+# Extra CA certificates (e.g. a private GitLab, a TLS-inspecting proxy, Bedrock via a proxy).
+# Point at a ConfigMap holding a PEM bundle. It is appended to the public roots, so a
+# bundle with only your CA is fine. With create: true the chart creates the ConfigMap empty
+# and labels it for OpenShift's trusted-CA injection (config.openshift.io/inject-trusted-cabundle).
+trustedCA:
+  configMap: ""      # e.g. trusted-ca
+  key: ca-bundle.crt
+  create: false
+
+serviceAccount:
+  annotations: {}    # e.g. eks.amazonaws.com/role-arn for Bedrock via IRSA
+
+resources:
+  requests: {cpu: 20m, memory: 256Mi}
+  limits: {memory: 768Mi}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile: {type: RuntimeDefault}
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities: {drop: [ALL]}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -25,8 +25,10 @@ gives `chhoto` and `ghcr.io/sintan1729/chhoto-url`. The agent turns that into
 flowchart LR
   subgraph cluster
     K[(k8s API)]
-    subgraph ns_homer["ns: homer"]
+    subgraph ns_rhapsode["ns: rhapsode"]
       R[rhapsode Deployment]
+    end
+    subgraph ns_homer["ns: homer"]
       CM1[ConfigMap homer-config<br/>written by rhapsode]
       CM2[ConfigMap rhapsode-cache]
       CM0[ConfigMap homer-bootstrap<br/>static, from git]
@@ -170,9 +172,11 @@ setup has two layers:
 writes a complete file: the base file `/config/base.yml` (ConfigMap
 `homer-base`) plus the `services` it generates.
 
-rhapsode runs in the `homer` namespace, next to the ConfigMaps it writes. Its
-write access is then one namespaced Role, limited by `resourceNames` to
-`homer-config` and `rhapsode-cache`. `create` can't be limited by name.
+rhapsode can run in any namespace. Its write access is one Role in Homer's
+namespace (the chart's `homerNamespace`), limited by `resourceNames` to
+`homer-config` and `rhapsode-cache`. `create` can't be limited by name. On a
+fresh cluster that Role can't be created until Homer's namespace exists. Argo
+CD's next sync retry fixes that.
 rhapsode writes it only when the content changed.
 
 ## Security
@@ -188,6 +192,11 @@ rhapsode writes it only when the content changed.
   - the URL is never the model's.
 - **SSRF.** `probe_url` checks the host against the discovered set and follows no
   redirects. `get_repo` has a fixed host list.
+- **Extra CAs.** The chart's `trustedCA` setting appends a PEM bundle to
+  certifi's roots in an init container, then points `SSL_CERT_FILE` (httpx)
+  and `NODE_EXTRA_CA_CERTS` (the CLI) at the result. `SSL_CERT_FILE`
+  replaces the default roots rather than adding to them, so the merge step is
+  needed. A bundle holding only the private CA still works.
 - **Container.** Runs as non-root with a read-only root filesystem. `HOME=/tmp`
   is an `emptyDir`, because the bundled Claude Code CLI writes session files
   there.
@@ -212,17 +221,21 @@ Auth comes from the environment, through the bundled Claude Code CLI:
 flowchart LR
   PR[PR to rhapsode] --> T[ci.yml: ruff + pytest + image build]
   T --> M[main]
-  M --> P[ci.yml: push ghcr.io/barakplasma/rhapsode<br/>sha-&lt;7&gt;, latest; amd64 + arm64]
-  P --> HM[homelab-manifests PR<br/>bumps apps/rhapsode tag]
+  M --> P[ci.yml: push image ghcr.io/barakplasma/rhapsode<br/>sha-&lt;7&gt;, latest; amd64 + arm64]
+  P --> CH[ci.yml: push chart oci://ghcr.io/barakplasma/charts/rhapsode<br/>0.1.0-sha-&lt;7&gt;, appVersion sha-&lt;7&gt;]
+  CH --> HM[homelab-manifests PR<br/>bumps the chart dependency version]
   HM --> Argo[Argo CD sync]
 ```
 
 - The image is multi-arch (the cluster node is arm64) and carries SBOM and
   provenance attestations. `v*` git tags also publish semver tags.
+- The Helm chart (`charts/rhapsode`) is the only deploy artifact. It ships as
+  an OCI artifact, published after the image so that its `appVersion` always
+  names an image that exists. One version string pins both.
 - The image is public on GHCR, because the repo is public, so no `ghcr-pull`
   Secret is needed.
-- `homelab-manifests` pins `sha-<7>` tags, following its
-  `test_image_pull_policy.py` rule. A bump workflow like `bump-aura.yml` can come
+- `homelab-manifests` wraps the chart as a dependency (`apps/rhapsode`), pinned
+  to a `-sha-<7>` version, following its `test_image_pull_policy.py` rule. A bump workflow like `bump-aura.yml` can come
   later if the manual bumps get tedious.
 
 ## Open questions

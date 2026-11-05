@@ -1,0 +1,9 @@
+apiVersion: v2
+name: rhapsode
+description: Fills a Homer dashboard with every public Ingress / HTTPRoute, labelled by a small LLM agent
+type: application
+# CI stamps both on publish: <version>-sha-<7> from main, <tag> from v* tags.
+version: 0.1.0
+appVersion: "latest"
+home: https://github.com/barakplasma/rhapsode
+sources: [https://github.com/barakplasma/rhapsode]

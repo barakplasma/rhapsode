@@ -1,0 +1,7 @@
+rhapsode writes ConfigMap {{ .Values.config.HOMER_CONFIGMAP | default "homer-config" }} in namespace {{ include "rhapsode.homerNamespace" . }}.
+
+Wire Homer to it so updates show up live (subPath mounts never update):
+  1. A ConfigMap with config.yml = "externalConfig: assets/rhapsode/config.yml",
+     mounted with subPath at /www/assets/config.yml.
+  2. ConfigMap {{ .Values.config.HOMER_CONFIGMAP | default "homer-config" }} mounted as a directory at /www/assets/rhapsode
+     (optional: true, rhapsode creates it on its first pass).

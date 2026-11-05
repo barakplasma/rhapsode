@@ -1,8 +1,10 @@
 name: CI
 
-# PRs: lint, test, and build the image for both arches (no push).
-# main and v* tags: the same, then push ghcr.io/barakplasma/rhapsode with
-# sha-<7> (what homelab-manifests pins), latest (main only) and semver (tags).
+# PRs: lint, test, render the chart, and build the image for both arches (no push).
+# main and v* tags: the same, then push to GHCR:
+#   image ghcr.io/barakplasma/rhapsode: sha-<7> (what homelab-manifests pins), latest (main), semver (tags)
+#   chart oci://ghcr.io/barakplasma/charts/rhapsode: <Chart.yaml version>-sha-<7> (main), <tag> (tags),
+#         with appVersion = the image tag pushed by the same run
 
 on:
   pull_request:
@@ -34,8 +36,29 @@ jobs:
       - run: ruff check src tests
       - run: pytest -q tests
 
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o kubeconform.tgz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  kubeconform.tgz" | sha256sum -c -
+          sudo tar xzf kubeconform.tgz -C /usr/local/bin kubeconform
+      - run: helm lint --strict charts/rhapsode
+      # default values, and with every optional branch on
+      - run: |
+          helm template t charts/rhapsode -n homer | kubeconform -strict -summary -
+          helm template t charts/rhapsode -n rhapsode --set homerNamespace=homer \
+            --set trustedCA.configMap=trusted-ca --set trustedCA.create=true \
+            --set-json 'extraEnv=[{"name":"X","valueFrom":{"secretKeyRef":{"name":"s","key":"k"}}}]' \
+            | kubeconform -strict -summary -
+
   image:
-    needs: test
+    needs: [test, chart]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -77,3 +100,32 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-chart:
+    needs: image  # the chart's appVersion must name an image that exists
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Package and push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            version="${REF_NAME#v}"; app="$version"
+          else
+            base=$(sed -n 's/^version: *//p' charts/rhapsode/Chart.yaml)
+            app="sha-${GITHUB_SHA:0:7}"; version="${base}-${app}"
+          fi
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GH_ACTOR" --password-stdin
+          helm package charts/rhapsode --version "$version" --app-version "$app"
+          helm push "rhapsode-${version}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts"

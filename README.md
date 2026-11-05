@@ -29,7 +29,7 @@ flowchart LR
   - `get_repo`: a GitHub or GitLab repo's description plus its README or one file.
   - `probe_url`: a GET on the URL. It only works on discovered hosts and does not follow redirects.
 - Output is a structured JSON label. It is still validated: lengths are clamped, and `icon` and `category` must come from an allowlist. The URL never comes from the model.
-- The result goes to ConfigMap `homer-config` (`config.yml`), built on top of `/config/base.yml`. Mount it in Homer as a directory at `/www/assets/rhapsode/`, plus a static `config.yml` containing `externalConfig: assets/rhapsode/config.yml`. Directory mounts update live. `subPath` mounts do not. See `deploy/manifests.yaml`.
+- The result goes to ConfigMap `homer-config` (`config.yml`), built on top of `/config/base.yml`. Mount it in Homer as a directory at `/www/assets/rhapsode/`, plus a static `config.yml` containing `externalConfig: assets/rhapsode/config.yml`. Directory mounts update live. `subPath` mounts do not. The chart's install notes repeat this.
 
 ## "Public" means
 
@@ -53,7 +53,41 @@ pytest -q tests
 OUTPUT_PATH=./config.yml ANTHROPIC_API_KEY=... rhapsode --once
 ```
 
-CI (`.github/workflows/ci.yml`) runs ruff and pytest on every PR and builds the image for `linux/amd64` and `linux/arm64`. On `main` it pushes `ghcr.io/barakplasma/rhapsode:sha-<7>` and `:latest`. On `v*` tags it pushes semver tags. Each image carries SBOM and provenance attestations.
+### Helm
+
+```bash
+kubectl -n homer create secret generic rhapsode --from-literal=openrouter-api-key=sk-or-...
+helm install rhapsode oci://ghcr.io/barakplasma/charts/rhapsode --version <version> -n homer -f my-values.yaml
+```
+
+```yaml
+# my-values.yaml (OpenRouter)
+config:
+  PUBLIC_INGRESS_CLASSES: cloudflare-tunnel
+  FORCE_HTTPS: "true"
+  AGENT_MODEL: anthropic/claude-haiku-5.5
+extraEnv:
+  - {name: ANTHROPIC_BASE_URL, value: https://openrouter.ai/api}
+  - {name: ANTHROPIC_API_KEY, value: ""}
+  - name: ANTHROPIC_AUTH_TOKEN
+    valueFrom: {secretKeyRef: {name: rhapsode, key: openrouter-api-key}}
+```
+
+Every option is in [`charts/rhapsode/values.yaml`](charts/rhapsode/values.yaml). Among them:
+
+- `homerNamespace`: install rhapsode somewhere other than Homer's namespace.
+- `trustedCA`: extra CA certificates for a private GitLab or a TLS-inspecting proxy. The CAs come from a ConfigMap, are appended to the public roots, and are used by both the Python side and the bundled CLI. `create: true` creates an OpenShift `trusted-ca` ConfigMap with the injection label.
+- `serviceAccount.annotations`: for IRSA with Bedrock.
+
+### CI
+
+`.github/workflows/ci.yml`:
+
+- **Every PR:** runs ruff and pytest, lints and renders the chart through `kubeconform`, and builds the image for `linux/amd64` and `linux/arm64`.
+- **`main`:**
+  - image `ghcr.io/barakplasma/rhapsode:sha-<7>` and `:latest`, with SBOM and provenance attestations;
+  - chart `oci://ghcr.io/barakplasma/charts/rhapsode:<version>-sha-<7>`, whose `appVersion` is that image tag.
+- **`v*` tags:** semver image tags, and a chart with the same version.
 
 ## Config env vars
 
@@ -73,3 +107,4 @@ CI (`.github/workflows/ci.yml`) runs ruff and pytest on every PR and builds the 
 | `GITHUB_TOKEN` | empty. Needed only for private repos |
 | `GITLAB_URL`, `GITLAB_TOKEN` | empty |
 | `PROBE_VERIFY_TLS` | `true` |
+| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` | set by the chart's `trustedCA` |
