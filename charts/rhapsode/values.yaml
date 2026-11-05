@@ -1,7 +1,7 @@
 image:
   repository: ghcr.io/barakplasma/rhapsode
   tag: ""            # defaults to the chart's appVersion
-  pullPolicy: IfNotPresent
+  pullPolicy: ""     # empty: Always for latest, else IfNotPresent
 
 # Namespace of Homer's ConfigMaps (homer-config, rhapsode-cache).
 # Empty: the release namespace. The write Role lives there.
