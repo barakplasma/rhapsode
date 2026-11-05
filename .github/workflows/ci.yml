@@ -57,6 +57,13 @@ jobs:
             --set trustedCA.existingConfigMap=trusted-ca \
             --set-json 'extraEnv=[{"name":"X","valueFrom":{"secretKeyRef":{"name":"s","key":"k"}}}]' \
             | kubeconform -strict -summary -
+      - name: values.schema.json rejects bad values
+        run: |
+          for bad in "image.pullPolicy=Sometimes" "trustedCA.enabeld=true" "typo=1" "homerNamespace=Bad_NS"; do
+            if helm template t charts/rhapsode --set "$bad" >/dev/null 2>&1; then
+              echo "::error::schema accepted --set $bad"; exit 1
+            fi
+          done
 
   image:
     needs: [test, chart]
