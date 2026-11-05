@@ -21,15 +21,33 @@ flowchart LR
 
 ## How it works
 
-- Every `RECONCILE_INTERVAL_S` (default 60) it lists Ingresses and HTTPRoutes.
-- An endpoint gets one short agent run only when its host, backend, namespace or annotations change. Labels are cached in a ConfigMap, so in steady state there are no LLM calls. A failed run gets a fallback label and is retried after `FAILURE_BACKOFF_S` (default 30 min).
-- The agent has no built-in tools: no shell, no files, no web. It has four tools of its own:
+- Every `RECONCILE_INTERVAL_S` (default 60) it lists Ingresses and HTTPRoutes, and groups hostnames that share a namespace and Service into one **backend**.
+- Each backend gets one short agent run, only when its hosts, Service, annotations or container images change. The run returns:
+  - a label;
+  - the primary hostname (the others become link pills on the card);
+  - any API docs it found;
+  - optionally a Homer smart card (Gatus, OliveTin).
+  
+  Each namespace gets one tiny run that titles its group. Everything is cached in a ConfigMap, so in steady state there are no LLM calls. A failed run gets a fallback label and is retried after `FAILURE_BACKOFF_S` (default 30 min).
+- The agent has no built-in tools: no shell, no files, no web. It has five tools of its own:
   - `get_workload`: backend Service and pod info.
   - `get_argocd_app`: the Argo CD Application.
   - `get_repo`: a GitHub or GitLab repo's description plus its README or one file.
-  - `probe_url`: a GET on the URL. It only works on discovered hosts and does not follow redirects.
-- Output is a structured JSON label. It is still validated: lengths are clamped, and `icon` and `category` must come from an allowlist. The URL never comes from the model.
-- The result goes to ConfigMap `homer-config` (`config.yml`), built on top of `/config/base.yml`. Mount it in Homer as a directory at `/www/assets/rhapsode/`, plus a static `config.yml` containing `externalConfig: assets/rhapsode/config.yml`. Directory mounts update live. `subPath` mounts do not. The chart's install notes repeat this.
+  - `probe_url`: a GET on a discovered host, without following redirects.
+  - `find_api_docs`: checks the backend's own Service, in-cluster, at about 20 well-known OpenAPI, Swagger, ReDoc and Scalar paths.
+- Output is a structured JSON label. It is still validated:
+  - lengths are clamped;
+  - `icon`, `category` and `smart_card` come from allowlists;
+  - the primary host must be one of the backend's own;
+  - API doc links are kept only for paths the tool confirmed.
+  
+  No URL comes from the model.
+- The result goes to ConfigMap `homer-config`:
+  - `config.yml`: every card, one group per namespace;
+  - one page per category (`ai.yml`, `tools.yml`, …);
+  - `apis.yml`, when any API docs exist.
+  
+  Homer's navbar links (`#rhapsode/ai`) switch pages. Mount the ConfigMap in Homer as a directory at `/www/assets/rhapsode/`, plus a static `config.yml` containing `externalConfig: assets/rhapsode/config.yml`. Directory mounts update live. `subPath` mounts do not. The chart's install notes repeat this.
 
 ## "Public" means
 
@@ -99,7 +117,7 @@ Every option is in [`charts/rhapsode/values.yaml`](charts/rhapsode/values.yaml).
 | `FORCE_HTTPS` | `false`. Set it when TLS ends upstream (e.g. Cloudflare Tunnel) |
 | `HOMER_NAMESPACE`, `HOMER_CONFIGMAP`, `CACHE_CONFIGMAP` | `homer`, `homer-config`, `rhapsode-cache` |
 | `HOMER_BASE_CONFIG` | `/config/base.yml` |
-| `OUTPUT_PATH` | empty. Set it to write a file instead of the ConfigMap |
+| `OUTPUT_PATH` | empty. Set it to write `config.yml` there (page files next to it) instead of the ConfigMap |
 | `RECONCILE_INTERVAL_S`, `FAILURE_BACKOFF_S` | `60`, `1800` |
 | `AGENT_CONCURRENCY`, `AGENT_MAX_TURNS`, `AGENT_MAX_BUDGET_USD`, `AGENT_TIMEOUT_S` | `3`, `8`, `0.05`, `180` |
 | `AGENT_MODEL` | SDK default |

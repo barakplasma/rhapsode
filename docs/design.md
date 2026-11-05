@@ -56,26 +56,34 @@ sequenceDiagram
   participant A as agent
   participant H as homer-config
   L->>K: list Ingresses + HTTPRoutes
-  L->>L: filter to public endpoints
+  L->>L: filter to public hosts, group by namespace + Service
+  L->>K: images behind each Service
   L->>C: load cache
-  loop each endpoint (max 3 in parallel)
+  loop each backend (max 3 in parallel)
     alt key in cache
       L->>L: reuse label
     else failed recently (backoff)
       L->>L: fallback label, no LLM call
-    else new or changed
-      L->>A: describe(endpoint)
-      A-->>L: structured JSON label
+    else new or changed (incl. a new image)
+      L->>A: describe(backend: all its hosts)
+      A-->>L: label + primary host + API docs + smart card
     end
   end
-  L->>H: write config.yml (only if changed)
+  loop each namespace
+    L->>A: name_namespace (cached the same way)
+    A-->>L: group title + icon
+  end
+  L->>H: write config.yml + one file per page (only if changed)
   L->>C: write cache (only if changed)
 ```
 
 ## Discovery
 
 An endpoint is one hostname. If several resources claim a host, the first one
-in list order wins.
+in list order wins. Endpoints that share a namespace and a backend Service are
+one **backend**: one agent run, one Homer card. Three hostnames for one Grafana
+become one card, and the extra hostnames become link pills on it. A route with
+no Service is a backend of its own.
 
 | Source | Backend | Scheme |
 |---|---|---|
@@ -97,7 +105,8 @@ it in. The annotation is the escape hatch, so the rules can stay simple.
 
 ## The agent
 
-One short Claude Agent SDK run per new or changed endpoint.
+One short Claude Agent SDK run per new or changed backend, and one tiny run per
+namespace to title its group.
 
 | Setting | Value | Why |
 |---|---|---|
@@ -106,7 +115,7 @@ One short Claude Agent SDK run per new or changed endpoint.
 | `setting_sources=[]`, `strict_mcp_config` | ignore any settings or `.mcp.json` on disk | behavior is fixed by code |
 | `output_format` | JSON schema for the label | no regex parsing of prose |
 | `max_turns` | 8 | bounds latency |
-| `max_budget_usd` | 0.05 | a hard cost cap per endpoint |
+| `max_budget_usd` | 0.05 | a hard cost cap per run |
 
 ### Tools
 
@@ -116,6 +125,13 @@ One short Claude Agent SDK run per new or changed endpoint.
 | `get_argocd_app(name)` | `spec.source(s)` and `destination` of an Argo CD Application | Read-only, `argocd` namespace only |
 | `get_repo(repo_url, path?)` | Repo description and topics, plus `README` or one file (e.g. `apps/chhoto/values.yaml`) | Only `github.com` and the configured `GITLAB_URL`. No `..` in the path. 3000 chars max |
 | `probe_url(url)` | Status, `<title>`, a text snippet | Only discovered hosts. No redirects followed |
+| `find_api_docs()` | Which of a fixed list of about 20 well-known doc paths (`/openapi.json`, `/v3/api-docs`, `/docs`, `/redoc`, `/swagger-ui/`, …) serve an OpenAPI/Swagger spec or a Swagger UI, ReDoc or Scalar page, and their titles | Only this run's own Service, in-cluster (`http://<svc>.<ns>.svc:<port>`), so a Cloudflare Access login is no obstacle. GET only, no redirects, 4 s timeout. Returns metadata, never the spec |
+
+**Why in-cluster for API docs.** From outside, none of the 21 public hosts
+serve docs at any of those paths. Some are behind Cloudflare Access, and the
+docs of an API behind a login are the ones worth listing. The Homer link still
+goes to the public host (`<primary host><path>`), so a person goes through
+Access as usual.
 
 The usual path here is: workload, then the Argo CD app (named after the
 namespace), then `get_repo` on `homelab-manifests` at `apps/<name>/values.yaml`.
@@ -130,22 +146,37 @@ workload and the probe.
 
 ```json
 {"name": "<=24", "subtitle": "<=60", "category": "Dev|Media|Monitoring|Data|AI|Infra|Home|Tools|Other",
- "icon": "fas fa-...", "tag": "<=12", "keywords": "...", "confidence": 0.0, "hide": false}
+ "icon": "fas fa-...", "keywords": "...", "confidence": 0.0, "hide": false,
+ "primary_host": "<one of this backend's hosts>", "api_docs": ["/docs", "/openapi.json"],
+ "smart_card": "|Gatus|Olivetin"}
 ```
+
+The namespace run returns `{"title": "<=24", "icon": "fas fa-..."}` and falls
+back to the raw namespace name.
 
 Treat it as untrusted, even with a schema:
 
 - strings are truncated to the limits;
 - `icon` must match `^fa[a-z]* fa-[a-z0-9-]+$`, else `fas fa-link`;
 - `category` falls back to `Other`;
-- `url` always comes from discovery and never from the model.
+- `primary_host` must be one of the backend's hosts, else the first;
+- `api_docs` keeps only paths that `find_api_docs` itself confirmed in the same
+  run (at most 3), so the model cannot add a link;
+- `smart_card` must be on the allowlist (`Gatus`, `Olivetin`: cards that read a
+  status or a version and need no API key in the public config);
+- every URL is built from discovery plus a confirmed path, never taken from the
+  model.
 
 ## Caching and cost
 
-- Cache key: `host` + `sha256(url, backend, namespace, annotations)[:16]`. The
-  label is only redone when something that identifies the service changes.
+- Backend key: `b.<namespace>.<service>.` + `sha256(hosts, service, port,
+  images, annotations)[:16]`. The label, primary host and API docs are redone
+  when something that identifies the service changes, including a new
+  container image (a release).
+- Namespace key: `ns.<namespace>.` + a hash of its cards' names, subtitles and
+  categories. The group title is redone when its members change.
 - The cache is the `rhapsode-cache` ConfigMap, so it survives restarts. Entries
-  for vanished hosts drop out on the next write.
+  for vanished backends and namespaces drop out on the next write.
 - **Failure backoff.** A failed run is not cached, so the next pass would retry
   it, and a broken endpoint would cost an agent run every 60 s. Failures are
   kept in memory and retried after `FAILURE_BACKOFF_S` (30 min). The Homer
@@ -176,8 +207,38 @@ rhapsode can run in any namespace. Its write access is one Role in Homer's
 namespace (the chart's `homerNamespace`), limited by `resourceNames` to
 `homer-config` and `rhapsode-cache`. `create` can't be limited by name. On a
 fresh cluster that Role can't be created until Homer's namespace exists. Argo
-CD's next sync retry fixes that.
-rhapsode writes it only when the content changed.
+CD's next sync retry fixes that. rhapsode writes only when the content changed.
+
+### Layout: pages and groups
+
+Homer has one level of groups, each holding cards. It cannot nest groups. It
+does offer two ways to nest without any change to Homer:
+
+- **`quick` links:** small pills along the bottom of a card. Alias hostnames
+  and API docs go there.
+- **pages:** a navbar link `#rhapsode/ai` makes Homer fetch
+  `assets/rhapsode/ai.yml` and shallow-merge it over the main config, so the
+  page's `services` replace the main ones. The page files are extra keys in the
+  same `homer-config` ConfigMap, so they land in the same directory mount.
+
+```mermaid
+flowchart TD
+  NAV["navbar: All · AI · Monitoring · Tools · … · APIs"]
+  NAV --> HOME["All (config.yml)<br/>one group per namespace, every card"]
+  NAV --> CAT["one page per category (ai.yml, …)<br/>the same namespace groups, filtered"]
+  NAV --> APIS["APIs (apis.yml)<br/>one card per API doc, grouped by namespace<br/>only when any exist"]
+  HOME --> CARD["card: name · subtitle · tag=category<br/>pills: other hostnames · Swagger/ReDoc/OpenAPI"]
+```
+
+- A group is a namespace, titled by the namespace run. Groups and cards are
+  sorted by name.
+- The category is the card's `tag`.
+- Two different backends with the same name get their primary host's first
+  label appended, for example "Grafana (metrics)".
+- A smart card (`type: Gatus` / `Olivetin`) gets no subtitle, because a
+  subtitle would hide the card's own status line. Smart cards call the app's
+  API from the browser, so they show `?` until that app allows Homer's origin
+  through CORS, or while it sits behind Cloudflare Access.
 
 ## Security
 
@@ -186,12 +247,16 @@ rhapsode writes it only when the content changed.
   ConfigMaps in `homer`. No Secrets.
 - **Prompt injection.** Every tool result is data an outsider may have written
   (a README, a page title). The worst case is a bad label, because:
-  - the model can't reach anything beyond the four tools;
+  - the model can't reach anything beyond the five tools;
   - the probe can only hit hosts that are already public;
   - the output is validated;
   - the URL is never the model's.
 - **SSRF.** `probe_url` checks the host against the discovered set and follows no
-  redirects. `get_repo` has a fixed host list.
+  redirects. `get_repo` has a fixed host list. `find_api_docs` takes no
+  arguments: it reaches only the run's own Service, at fixed paths, and returns
+  metadata, not response bodies. It can see past Cloudflare Access, because
+  it calls the Service directly. In return, what it reports is a path that exists
+  and a title, and the link it produces still goes through the public host.
 - **Extra CAs (OpenShift trusted-ca).** The chart creates nothing. It mounts an
   existing ConfigMap (`trustedCAConfigMap`, default `trusted-ca`) as optional.
   On OpenShift that is the ConfigMap the cluster network operator injects the
@@ -247,7 +312,10 @@ flowchart LR
 
 1. A liveness probe. There is no HTTP server today. A heartbeat file plus an
    `exec` probe would catch a hung loop. Skipped until it happens.
-2. Should low-`confidence` labels be tagged (`tag: "?"`) so they stand out for
-   a manual `rhapsode/ignore` or a re-run? Today they are listed as-is.
+2. Should low-`confidence` labels stand out (`tagstyle: is-warning`) for a
+   manual `rhapsode/ignore` or a re-run? Today they are listed as-is.
 3. A manual override annotation (`rhapsode/name`, `rhapsode/icon`) that skips the
    agent entirely. Cheap to add once there is a real case for it.
+4. API docs of a Service exposed under a sub-path (an Ingress path other than
+   `/`) are linked on the host root, so the link would be wrong. No such
+   Ingress exists here today. Carry the path prefix through when one appears.

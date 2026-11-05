@@ -1,4 +1,5 @@
 """Tools the agent can call. Exposed to the Claude Agent SDK as an in-process MCP server."""
+import asyncio
 import json
 import re
 from urllib.parse import quote, urlparse
@@ -8,8 +9,16 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from kubernetes import client
 
 from .config import Config
+from .discovery import Backend
 
 MAX = 3000  # chars returned per tool call; keeps context small
+
+# Where frameworks publish API docs by default (FastAPI, Spring, NestJS, Django REST, Swagger UI, ReDoc, Scalar).
+DOC_PATHS = ["/openapi.json", "/openapi.yaml", "/openapi", "/swagger.json", "/v3/api-docs", "/v2/api-docs",
+             "/api/openapi.json", "/api/swagger.json", "/api/v1/openapi.json", "/api-docs", "/api/schema/",
+             "/.well-known/openapi.json", "/docs", "/redoc", "/swagger", "/swagger-ui/", "/swagger/index.html",
+             "/api/docs", "/scalar"]
+DOC_KINDS = ["openapi", "swagger", "swagger-ui", "redoc", "scalar"]
 
 
 def _txt(obj) -> dict:
@@ -58,7 +67,47 @@ async def fetch_repo(cfg: Config, repo_url: str, path: str) -> dict | str:
             "file": path or "README", "content": f.text[:2000] if f.status_code == 200 else f"({f.status_code})"}
 
 
-def build_server(cfg: Config, allowed_hosts: set[str]):
+def classify_doc(body: str) -> tuple[str, str] | None:
+    """(kind, title) when a response body is an API spec or a docs UI, else None. SPA catch-alls don't match."""
+    head = body[:20000]
+    if re.search(r'"openapi"\s*:', head[:4000]) or re.match(r"\s*openapi\s*:", head):
+        kind = "openapi"
+    elif re.search(r'"swagger"\s*:', head[:4000]) or re.match(r"\s*swagger\s*:", head):
+        kind = "swagger"
+    elif re.search(r"swagger-ui|SwaggerUIBundle", head, re.I):
+        kind = "swagger-ui"
+    elif re.search(r"<redoc|redoc\.standalone", head, re.I):
+        kind = "redoc"
+    elif re.search(r"@scalar/api-reference|<script[^>]+id=[\"']api-reference", head, re.I):
+        kind = "scalar"
+    else:
+        return None
+    if kind in ("openapi", "swagger"):
+        m = re.search(r'"title"\s*:\s*"([^"]{1,80})"', head) or re.search(r"\n\s+title:\s*['\"]?([^\n'\"]{1,80})", head)
+    else:
+        m = re.search(r"<title[^>]*>([^<]{1,80})</title>", head, re.I)
+    return kind, (m.group(1).strip() if m else "")
+
+
+async def probe_docs(base: str) -> dict[str, dict]:
+    """GET every DOC_PATHS entry on base concurrently; {path: {kind, title}} for the ones that are API docs."""
+    async def one(c: httpx.AsyncClient, path: str):
+        try:
+            r = await c.get(base + path)
+        except httpx.HTTPError:
+            return None
+        hit = classify_doc(r.text) if r.status_code == 200 else None
+        return (path, {"kind": hit[0], "title": hit[1]}) if hit else None
+
+    async with httpx.AsyncClient(timeout=4, follow_redirects=False) as c:
+        found = await asyncio.gather(*(one(c, p) for p in DOC_PATHS))
+    return dict(f for f in found if f)
+
+
+def build_server(cfg: Config, allowed_hosts: set[str], backend: Backend | None = None):
+    # Paths find_api_docs confirmed in this run; the agent's api_docs answer is filtered against it.
+    confirmed: dict[str, dict] = {}
+
     @tool("get_workload", "Images, ports and labels of the pods behind a Service.", {"namespace": str, "service": str})
     async def get_workload(args):
         core = client.CoreV1Api()
@@ -121,5 +170,25 @@ def build_server(cfg: Config, allowed_hosts: set[str]):
                      "title": title.group(1).strip() if title else None,
                      "text": re.sub(r"\s+", " ", text)[:800]})
 
-    server = create_sdk_mcp_server("disc", tools=[get_workload, get_argocd_app, get_repo, probe_url])
-    return server, [f"mcp__disc__{t}" for t in ("get_workload", "get_argocd_app", "get_repo", "probe_url")]
+    @tool(
+        "find_api_docs",
+        "Check this endpoint's own Service, inside the cluster (past any login proxy), for OpenAPI/Swagger "
+        "specs and API docs UIs at the usual paths. Returns {path: {kind, title}}; empty means none found.",
+        {},
+    )
+    async def find_api_docs(args):
+        if backend is None or not backend.service:
+            return _txt("no Service behind this endpoint")
+        try:  # an Ingress may name the port; the in-cluster URL needs the number
+            svc = client.CoreV1Api().read_namespaced_service(backend.service, backend.namespace)
+        except client.ApiException as e:
+            return _txt(f"k8s error {e.status}")
+        ports = svc.spec.ports or []
+        port = next((p.port for p in ports if backend.port in (p.port, p.name)), ports[0].port if ports else 80)
+        found = await probe_docs(f"http://{backend.service}.{backend.namespace}.svc:{port}")
+        confirmed.update(found)
+        return _txt(found or "no API docs found")
+
+    names = ("get_workload", "get_argocd_app", "get_repo", "probe_url", "find_api_docs")
+    server = create_sdk_mcp_server("disc", tools=[get_workload, get_argocd_app, get_repo, probe_url, find_api_docs])
+    return server, [f"mcp__disc__{t}" for t in names], confirmed
