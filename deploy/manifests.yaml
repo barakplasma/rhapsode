@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: rhapsode, namespace: homer}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: rhapsode}
+rules:
+  - apiGroups: [""]
+    resources: [services, pods]
+    verbs: [get, list]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [list]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [list]
+  - apiGroups: [argoproj.io]
+    resources: [applications]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: rhapsode}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: rhapsode}
+subjects: [{kind: ServiceAccount, name: rhapsode, namespace: homer}]
+---
+# ConfigMaps are namespaced: write access only in homer's namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: rhapsode, namespace: homer}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: rhapsode, namespace: homer}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: rhapsode}
+subjects: [{kind: ServiceAccount, name: rhapsode, namespace: homer}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: homer-base, namespace: homer}
+data:
+  base.yml: |
+    title: "Home"
+    subtitle: "Auto-discovered services"
+    columns: "auto"
+    theme: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: rhapsode, namespace: homer}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: rhapsode}}
+  template:
+    metadata: {labels: {app: rhapsode}}
+    spec:
+      serviceAccountName: rhapsode
+      containers:
+        - name: app
+          image: ghcr.io/barakplasma/rhapsode:latest
+          env:
+            # --- pick ONE auth mode ---
+            - name: ANTHROPIC_API_KEY            # API key mode
+              valueFrom: {secretKeyRef: {name: rhapsode, key: anthropic-api-key, optional: true}}
+            # - {name: CLAUDE_CODE_USE_BEDROCK, value: "1"}   # Bedrock mode: also set AWS_REGION and
+            # - {name: AWS_REGION, value: eu-central-1}       # credentials (secret env vars or IRSA)
+            # - {name: AGENT_MODEL, value: "<bedrock inference profile id>"}
+            - {name: GITLAB_URL, value: "https://gitlab.example.com"}
+            - name: GITLAB_TOKEN
+              valueFrom: {secretKeyRef: {name: rhapsode, key: gitlab-token, optional: true}}
+          volumeMounts: [{name: base, mountPath: /config}]
+          resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {memory: 768Mi}}
+      volumes: [{name: base, configMap: {name: homer-base}}]
+# In Homer's own Deployment, mount ConfigMap `homer-config` (key config.yml) at /www/assets/config.yml via subPath
+# (note: subPath mounts don't live-update; mount the whole dir or restart Homer, see README).
