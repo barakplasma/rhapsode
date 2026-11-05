@@ -7,6 +7,11 @@ image:
 # Empty: the release namespace. The write Role lives there.
 homerNamespace: ""
 
+# Hostnames allowed on the dashboard. Default-deny: a discovered host that is not listed here is never
+# published; it is listed in ConfigMap rhapsode-pending instead (see the install notes). Exact hostnames,
+# no wildcards, because a wildcard would approve every future Ingress on that domain.
+approvedHosts: []
+
 # Plain settings, rendered as env (see the README for every variable).
 config:
   PUBLIC_INGRESS_CLASSES: ""

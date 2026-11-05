@@ -1,9 +1,10 @@
 import asyncio
+import dataclasses
 
 import pytest
 import yaml
 
-from rhapsode import agent, controller, homer, tools
+from rhapsode import agent, approval, controller, homer, tools
 from rhapsode.config import Config
 from rhapsode.discovery import Endpoint, _public, group_backends
 
@@ -142,50 +143,180 @@ def _ep(host, svc="svc"):
     return Endpoint(f"https://{host}", host, "Ingress ns/x", "ns", svc, {}, 80)
 
 
-def test_reconcile_caches_backs_off_and_merges_hosts(monkeypatch):
-    cache, published, calls = {}, [], []
+class Cluster:
+    """Fake cluster + agent around controller.reconcile: records agent calls, publishes and the cache."""
 
-    async def fake_describe(cfg, b, hosts):
-        calls.append(tuple(b.hosts))
+    def __init__(self, monkeypatch):
+        self.cache, self.published, self.pending, self.calls = {}, [], [], []
+        self.images = ["img:1"]
+        monkeypatch.setattr(controller, "discover", lambda cfg: [
+            _ep("good1.example.com"), _ep("good2.example.com"), _ep("bad.example.com", "b")])
+        monkeypatch.setattr(controller, "backend_images", lambda b: self.images)
+        monkeypatch.setattr(controller, "describe", self._describe)
+        monkeypatch.setattr(controller, "name_namespace", self._ns)
+        monkeypatch.setattr(controller, "auth_hint", self._hint)
+        monkeypatch.setattr(homer, "load_cache", lambda cfg: dict(self.cache))
+        monkeypatch.setattr(homer, "save_cache", lambda cfg, d: self.cache.clear() or self.cache.update(d))
+        monkeypatch.setattr(homer, "publish", lambda cfg, files: self.published.append(files))
+        monkeypatch.setattr(homer, "publish_pending", lambda cfg, y: self.pending.append(yaml.safe_load(y)["pending"]))
+        monkeypatch.setattr(controller, "_failed", {})
+        monkeypatch.setattr(controller, "_last_published", None)
+        monkeypatch.setattr(controller, "_last_pending", None)
+
+    async def _describe(self, cfg, b, hosts):
+        self.calls.append(tuple(b.hosts))
         if b.hosts[0].startswith("bad"):
             raise RuntimeError("boom")
         return {"name": "Good", "subtitle": "", "category": "Dev", "icon": "fas fa-x", "confidence": 1,
                 "hide": False, "primary_host": b.hosts[-1], "api_docs": [{"path": "/docs", "kind": "swagger-ui"}],
                 "smart_card": ""}
 
-    async def fake_ns(cfg, ns, cards):
-        calls.append(("ns", ns))
+    async def _ns(self, cfg, ns, cards):
+        self.calls.append(("ns", ns, tuple(sorted(c["name"] for c in cards))))
         return {"title": "Namespace", "icon": "fas fa-cube"}
 
-    monkeypatch.setattr(controller, "discover",
-                        lambda cfg: [_ep("good1.example.com"), _ep("good2.example.com"), _ep("bad.example.com", "b")])
-    monkeypatch.setattr(controller, "backend_images", lambda b: ["img:1"])
-    monkeypatch.setattr(controller, "describe", fake_describe)
-    monkeypatch.setattr(controller, "name_namespace", fake_ns)
-    monkeypatch.setattr(homer, "load_cache", lambda cfg: dict(cache))
-    monkeypatch.setattr(homer, "save_cache", lambda cfg, d: cache.clear() or cache.update(d))
-    monkeypatch.setattr(homer, "publish", lambda cfg, files: published.append(files))
-    monkeypatch.setattr(controller, "_failed", {})
-    monkeypatch.setattr(controller, "_last_published", None)
+    async def _hint(self, cfg, url):
+        return "cloudflare-access" if "good" in url else "no-auth-seen"
 
-    asyncio.run(controller.reconcile(CFG))
-    assert sorted(calls) == [("bad.example.com",), ("good1.example.com", "good2.example.com"), ("ns", "ns")]
-    assert len(cache) == 2  # the good backend and the namespace title; the failure is not cached
-    home = yaml.safe_load(published[0]["config.yml"])
+    def run(self, *approved):
+        asyncio.run(controller.reconcile(dataclasses.replace(CFG, approved_hosts=list(approved))))
+
+    def text(self):
+        return "\n".join(self.published[-1].values())
+
+
+ALL = ("good1.example.com", "good2.example.com", "bad.example.com")
+
+
+def test_reconcile_caches_backs_off_and_merges_hosts(monkeypatch):
+    c = Cluster(monkeypatch)
+    c.run(*ALL)
+    assert sorted(c.calls) == [("bad.example.com",), ("good1.example.com", "good2.example.com"),
+                               ("ns", "ns", ("Good", "bad"))]
+    assert len(c.cache) == 2  # the good backend and the namespace title; the failure is not cached
+    home = yaml.safe_load(c.published[0]["config.yml"])
     assert [g["name"] for g in home["services"]] == ["Namespace"]
     good = next(i for i in home["services"][0]["items"] if i["name"] == "Good")
     assert good["url"] == "https://good2.example.com"  # the agent's primary host
     assert [q["url"] for q in good["quick"]] == ["https://good1.example.com", "https://good2.example.com/docs"]
     assert any(i["name"] == "bad" for i in home["services"][0]["items"])  # failure listed with fallback label
 
-    asyncio.run(controller.reconcile(CFG))
-    assert len(calls) == 3  # cached, and the failure is in backoff: no new agent runs
-    assert len(published) == 1  # unchanged output is not re-published
-    assert len(cache) == 2  # cache hits survive the rewrite
+    c.run(*ALL)
+    assert len(c.calls) == 3  # cached, and the failure is in backoff: no new agent runs
+    assert len(c.published) == 1  # unchanged output is not re-published
+    assert len(c.cache) == 2  # cache hits survive the rewrite
 
-    monkeypatch.setattr(controller, "backend_images", lambda b: ["img:2"])  # a release
-    asyncio.run(controller.reconcile(CFG))
-    assert calls[-1] == ("good1.example.com", "good2.example.com")
+    c.images = ["img:2"]  # a release
+    c.run(*ALL)
+    assert ("good1.example.com", "good2.example.com") in c.calls[3:]  # relabelled; the namespace title is a hit
+
+
+def test_default_deny_publishes_nothing_and_lists_everything_as_pending(monkeypatch):
+    c = Cluster(monkeypatch)
+    c.run()  # nothing approved
+    assert set(c.published[0]) == {"config.yml"}
+    assert yaml.safe_load(c.published[0]["config.yml"])["services"] == []
+    assert not any(h in c.text() for h in ("good1", "good2", "bad", "Good"))
+    assert [p["host"] for p in c.pending[0]] == ["bad.example.com", "good1.example.com", "good2.example.com"]
+    assert not any(call[0] == "ns" for call in c.calls)  # no namespace run: no approved card to title
+
+
+def test_only_approved_hosts_are_published_and_the_rest_are_pending(monkeypatch):
+    c = Cluster(monkeypatch)
+    c.run("GOOD2.example.com")  # hostnames are case-insensitive
+    pages = "\n".join(c.published[0].values())
+    assert "good2.example.com" in pages
+    assert not any(h in pages for h in ("good1", "bad.example.com", "bad"))  # not in any page, pill or title
+    assert ("ns", "ns", ("Good",)) in c.calls  # the namespace run saw approved cards only
+    good = yaml.safe_load(c.published[0]["config.yml"])["services"][0]["items"][0]
+    assert [q["url"] for q in good["quick"]] == ["https://good2.example.com/docs"]  # no pill for unapproved good1
+    assert c.pending == [[
+        {"host": "bad.example.com", "namespace": "ns", "service": "b", "images": ["img:1"], "auth": "no-auth-seen",
+         # the agent failed for this one, so the suggestion is the fallback label
+         "suggested": {"name": "bad", "subtitle": "Ingress ns/x", "category": "Other"}},
+        {"host": "good1.example.com", "namespace": "ns", "service": "svc", "images": ["img:1"],
+         "auth": "cloudflare-access", "suggested": {"name": "Good", "subtitle": "", "category": "Dev"}}]]
+
+    c.run("good2.example.com")
+    assert len(c.pending) == 1 and len(c.published) == 1  # nothing changed: nothing rewritten
+
+    n = len(c.calls)
+    c.run("good2.example.com", "good1.example.com")  # approving a host needs no new agent run for its backend
+    assert [x for x in c.calls[n:] if x[0] != "ns"] == []
+    assert "https://good1.example.com" in [q["url"] for q in yaml.safe_load(
+        c.published[1]["config.yml"])["services"][0]["items"][0]["quick"]]
+    assert [p["host"] for p in c.pending[-1]] == ["bad.example.com"]
+
+
+def test_hidden_by_the_agent_is_never_pending(monkeypatch):
+    c = Cluster(monkeypatch)
+    describe_good = c._describe
+    internal = {"name": "Internal", "subtitle": "", "category": "Other", "icon": "fas fa-x", "confidence": 1,
+                "hide": True, "primary_host": "bad.example.com", "api_docs": [], "smart_card": ""}
+
+    async def hide_bad(cfg, b, hosts):
+        return internal if b.hosts[0].startswith("bad") else await describe_good(cfg, b, hosts)
+
+    monkeypatch.setattr(controller, "describe", hide_bad)
+    c.run()
+    assert [p["host"] for p in c.pending[0]] == ["good1.example.com", "good2.example.com"]
+    c.run("bad.example.com")  # approving it does not publish it either: the agent said it is internal
+    assert "bad.example.com" not in c.text()
+
+
+def test_a_failing_pending_publish_does_not_cost_the_cache(monkeypatch):
+    c = Cluster(monkeypatch)
+
+    def boom(cfg, y):
+        raise RuntimeError("forbidden")
+
+    monkeypatch.setattr(homer, "publish_pending", boom)
+    c.run(*ALL)
+    assert len(c.published) == 1 and len(c.cache) == 2  # the dashboard and the cache are saved regardless
+
+
+@pytest.mark.parametrize("status,location,want", [
+    (302, "https://team.cloudflareaccess.com/cdn-cgi/access/login/x", "cloudflare-access"),
+    (302, "https://app.example.com/cdn-cgi/access/authorized", "cloudflare-access"),
+    (401, "", "401"), (403, "", "403"),
+    (302, "/login?next=/", "login-redirect"), (303, "https://sso.example.com/oauth/authorize", "login-redirect"),
+    (302, "/dashboard/", "no-auth-seen"), (200, "", "no-auth-seen"), (404, "", "no-auth-seen"),
+])
+def test_classify_auth(status, location, want):
+    assert approval.classify_auth(status, location) == want
+
+
+def test_auth_hint_against_a_real_server():
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/login-wall":
+                self.send_response(302)
+                self.send_header("Location", "/login?next=/")
+            elif self.path == "/401":
+                self.send_response(401)
+            else:
+                self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+
+    async def hints():
+        return [await approval.auth_hint(CFG, base + p) for p in ("/login-wall", "/401", "/open")]
+
+    try:
+        assert asyncio.run(hints()) == ["login-redirect", "401", "no-auth-seen"]
+    finally:
+        srv.shutdown()
+    assert asyncio.run(approval.auth_hint(CFG, base + "/open")) == "no-auth-seen"  # cached: server is gone
+    assert asyncio.run(approval.auth_hint(CFG, "http://127.0.0.1:9/x")) == "unreachable"
 
 
 def test_probe_docs_against_a_real_server():

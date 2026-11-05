@@ -39,6 +39,15 @@
       "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$",
       "description": "Namespace of Homer's ConfigMaps. Empty: the release namespace."
     },
+    "approvedHosts": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Hostnames allowed on the dashboard (default-deny; exact names, no wildcards).",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?$"
+      }
+    },
     "config": {
       "type": "object",
       "description": "Rendered as env vars; see the README for every variable.",

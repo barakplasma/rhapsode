@@ -54,12 +54,13 @@ jobs:
           helm template t charts/rhapsode -n homer | kubeconform -strict -summary -
           helm template t charts/rhapsode -n homer --set trustedCAConfigMap= | kubeconform -strict -summary -
           helm template t charts/rhapsode -n rhapsode --set homerNamespace=homer \
-            --set trustedCAConfigMap=my-ca \
+            --set trustedCAConfigMap=my-ca --set-json 'approvedHosts=["a.example.com","b.example.com"]' \
             --set-json 'extraEnv=[{"name":"X","valueFrom":{"secretKeyRef":{"name":"s","key":"k"}}}]' \
             | kubeconform -strict -summary -
       - name: values.schema.json rejects bad values
         run: |
-          for bad in "image.pullPolicy=Sometimes" "trustedCAConfigMap=Bad_Name" "typo=1" "homerNamespace=Bad_NS"; do
+          for bad in "image.pullPolicy=Sometimes" "trustedCAConfigMap=Bad_Name" "typo=1" "homerNamespace=Bad_NS" \
+                     "approvedHosts[0]=bad host" "approvedHosts[0]=*.example.com"; do
             if helm template t charts/rhapsode --set "$bad" >/dev/null 2>&1; then
               echo "::error::schema accepted --set $bad"; exit 1
             fi

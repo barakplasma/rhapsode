@@ -22,6 +22,7 @@ flowchart LR
 ## How it works
 
 - Every `RECONCILE_INTERVAL_S` (default 60) it lists Ingresses and HTTPRoutes, and groups hostnames that share a namespace and Service into one **backend**.
+- Discovery only finds **candidates**: a hostname is published only after it is approved (see [Approval](#approval)).
 - Each backend gets one short agent run, only when its hosts, Service, annotations or container images change. The run returns:
   - a label;
   - the primary hostname (the others become link pills on the card);
@@ -51,7 +52,20 @@ flowchart LR
 
 ## "Public" means
 
-The host is a real, non-wildcard hostname. Its namespace is not in `EXCLUDE_NAMESPACES`. It does not end in one of `EXCLUDE_HOST_SUFFIXES`. If `PUBLIC_INGRESS_CLASSES` is set (e.g. `cloudflare-tunnel`), its ingress class is in that list. Override per resource with the annotation `rhapsode/ignore: "true"|"false"`.
+The host is a real, non-wildcard hostname. Its namespace is not in `EXCLUDE_NAMESPACES`. It does not end in one of `EXCLUDE_HOST_SUFFIXES`. If `PUBLIC_INGRESS_CLASSES` is set (e.g. `cloudflare-tunnel`), its ingress class is in that list. Override per resource with the annotation `rhapsode/ignore: "true"|"false"` (`"true"` drops it entirely, `"false"` makes it a candidate).
+
+## Approval
+
+Public by those rules only makes a host a **candidate**. Nothing is published until its exact hostname is in `APPROVED_HOSTS` (the chart's `approvedHosts`). The default is empty, so a fresh install publishes nothing. Wildcards are not supported.
+
+```bash
+# what is waiting, with a suggested label and whether it looks login-protected
+kubectl -n homer get cm rhapsode-pending -o jsonpath='{.data.pending\.yaml}'
+```
+
+Each entry has the host, namespace, Service, images, the suggested label and an `auth` hint (`cloudflare-access`, `401`, `403`, `login-redirect`, `no-auth-seen`, `unreachable`). `no-auth-seen` means "answered without asking for a login", which is a reason to look closer. Approve a host by adding it to `approvedHosts` and upgrading. The pending list is not on Homer, because Homer's pages are public.
+
+The agent still runs for pending hosts so the list can suggest a label. That means details about services you haven't approved go to your LLM provider.
 
 ## LLM auth
 
@@ -111,6 +125,8 @@ Every option is in [`charts/rhapsode/values.yaml`](charts/rhapsode/values.yaml).
 
 | Var | Default |
 |---|---|
+| `APPROVED_HOSTS` | empty: nothing is published. Comma-separated exact hostnames |
+| `PENDING_CONFIGMAP` | `rhapsode-pending` |
 | `PUBLIC_INGRESS_CLASSES` | empty (any class) |
 | `EXCLUDE_NAMESPACES` | `kube-system` |
 | `EXCLUDE_HOST_SUFFIXES` | `.svc,.local,.internal,.cluster.local` |

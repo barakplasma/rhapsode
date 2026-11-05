@@ -16,6 +16,8 @@ class Config:
     exclude_host_suffixes: list[str] = field(
         default_factory=lambda: _list("EXCLUDE_HOST_SUFFIXES", ".svc,.local,.internal,.cluster.local")
     )
+    # Default-deny: only these exact hostnames are published. Everything else discovered is listed as pending.
+    approved_hosts: list[str] = field(default_factory=lambda: _list("APPROVED_HOSTS"))
     # TLS terminated upstream (e.g. Cloudflare Tunnel): label every URL https
     force_https: bool = os.environ.get("FORCE_HTTPS", "false").lower() == "true"
     # --- output
@@ -24,6 +26,7 @@ class Config:
     base_config_path: str = os.environ.get("HOMER_BASE_CONFIG", "/config/base.yml")
     output_path: str = os.environ.get("OUTPUT_PATH", "")  # set for local dev; skips the ConfigMap
     cache_configmap: str = os.environ.get("CACHE_CONFIGMAP", "rhapsode-cache")
+    pending_configmap: str = os.environ.get("PENDING_CONFIGMAP", "rhapsode-pending")
     # --- loop
     interval_s: int = int(os.environ.get("RECONCILE_INTERVAL_S", "60"))
     agent_concurrency: int = int(os.environ.get("AGENT_CONCURRENCY", "3"))
