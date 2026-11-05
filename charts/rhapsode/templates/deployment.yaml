@@ -1,0 +1,71 @@
+{{- $ca := .Values.trustedCAConfigMap -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels: {{- include "rhapsode.labels" . | nindent 4 }}
+spec:
+  replicas: 1          # one writer for the ConfigMaps
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: rhapsode, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {{- include "rhapsode.labels" . | nindent 8 }}
+      annotations:
+        checksum/base: {{ .Values.baseConfig | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if $ca }}
+      # httpx's SSL_CERT_FILE replaces its roots, so append the extra CAs to certifi's bundle.
+      initContainers:
+        - name: ca-bundle
+          {{- include "rhapsode.image" . | nindent 10 }}
+          # The ConfigMap may be absent (optional mount) or not yet injected: then only the public roots.
+          # shortcut: merged once at pod start, so a rotated cluster bundle needs a pod restart
+          command: [sh, -c, 'cat "$(python -c "import certifi; print(certifi.where())")" > /tmp/ca-bundle.pem && if [ -f /ca/ca-bundle.crt ]; then cat /ca/ca-bundle.crt >> /tmp/ca-bundle.pem; fi']
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: ca, mountPath: /ca, readOnly: true}
+      {{- end }}
+      containers:
+        - name: rhapsode
+          {{- include "rhapsode.image" . | nindent 10 }}
+          env:
+            - {name: HOMER_NAMESPACE, value: {{ include "rhapsode.homerNamespace" . | quote }}}
+            - {name: HOMER_BASE_CONFIG, value: /config/base.yml}
+            {{- range $k, $v := .Values.config }}
+            - {name: {{ $k }}, value: {{ $v | toString | quote }}}
+            {{- end }}
+            {{- if $ca }}
+            - {name: SSL_CERT_FILE, value: /tmp/ca-bundle.pem}
+            - {name: NODE_EXTRA_CA_CERTS, value: /tmp/ca-bundle.pem}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: base, mountPath: /config}
+            - {name: tmp, mountPath: /tmp}   # HOME: the bundled Claude Code CLI writes here
+      volumes:
+        - name: base
+          configMap: {name: {{ .Release.Name }}-base}
+        - name: tmp
+          emptyDir: {}
+        {{- if $ca }}
+        - name: ca
+          configMap: {name: {{ $ca }}, optional: true}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

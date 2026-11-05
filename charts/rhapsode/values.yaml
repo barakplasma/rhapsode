@@ -1,0 +1,54 @@
+image:
+  repository: ghcr.io/barakplasma/rhapsode
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: ""     # empty: Always for latest, else IfNotPresent
+
+# Namespace of Homer's ConfigMaps (homer-config, rhapsode-cache).
+# Empty: the release namespace. The write Role lives there.
+homerNamespace: ""
+
+# Plain settings, rendered as env (see the README for every variable).
+config:
+  PUBLIC_INGRESS_CLASSES: ""
+  EXCLUDE_NAMESPACES: kube-system
+  FORCE_HTTPS: "false"
+  AGENT_MODEL: ""
+
+# Raw env entries, for Secrets. Pick one LLM backend:
+#   OpenRouter: ANTHROPIC_BASE_URL=https://openrouter.ai/api, ANTHROPIC_API_KEY="",
+#               ANTHROPIC_AUTH_TOKEN from a Secret, config.AGENT_MODEL=anthropic/claude-haiku-5.5
+#   Anthropic:  ANTHROPIC_API_KEY from a Secret
+#   Bedrock:    CLAUDE_CODE_USE_BEDROCK=1, AWS_REGION, AWS creds, config.AGENT_MODEL=<inference profile>
+extraEnv: []
+
+# Homer config that the generated services list is merged into.
+baseConfig: |
+  title: "Home"
+  subtitle: "Auto-discovered services"
+  icon: "fas fa-house"
+  columns: "auto"
+
+# An existing ConfigMap with extra CAs under key ca-bundle.crt, appended to the public roots.
+# Default: OpenShift's trusted-ca (an injected cluster trust bundle). Mounted optional, so where it
+# doesn't exist the pod still starts with the public roots only. Empty: no init container at all.
+trustedCAConfigMap: trusted-ca
+
+serviceAccount:
+  annotations: {}    # e.g. eks.amazonaws.com/role-arn for Bedrock via IRSA
+
+resources:
+  requests: {cpu: 20m, memory: 256Mi}
+  limits: {memory: 768Mi}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile: {type: RuntimeDefault}
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities: {drop: [ALL]}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
