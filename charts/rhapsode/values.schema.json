@@ -4,16 +4,35 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "global": {"type": "object", "description": "Injected by Helm when used as a subchart."},
+    "global": {
+      "type": "object",
+      "description": "Injected by Helm when used as a subchart."
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "repository": {"type": "string", "minLength": 1},
-        "tag": {"type": "string", "description": "Empty: the chart's appVersion."},
-        "pullPolicy": {"enum": ["", "Always", "IfNotPresent", "Never"], "description": "Empty: Always for latest, else IfNotPresent."}
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "description": "Empty: the chart's appVersion."
+        },
+        "pullPolicy": {
+          "enum": [
+            "",
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ],
+          "description": "Empty: Always for latest, else IfNotPresent."
+        }
       },
-      "required": ["repository"]
+      "required": [
+        "repository"
+      ]
     },
     "homerNamespace": {
       "type": "string",
@@ -23,48 +42,84 @@
     "config": {
       "type": "object",
       "description": "Rendered as env vars; see the README for every variable.",
-      "propertyNames": {"pattern": "^[A-Z_][A-Z0-9_]*$"},
-      "additionalProperties": {"type": ["string", "number", "boolean"]}
+      "propertyNames": {
+        "pattern": "^[A-Z_][A-Z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      }
     },
     "extraEnv": {
       "type": "array",
       "description": "Raw container env entries, e.g. secretKeyRef-backed LLM credentials.",
       "items": {
         "type": "object",
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "properties": {
-          "name": {"type": "string", "minLength": 1},
-          "value": {"type": "string"},
-          "valueFrom": {"type": "object"}
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value": {
+            "type": "string"
+          },
+          "valueFrom": {
+            "type": "object"
+          }
         },
         "additionalProperties": false
       }
     },
-    "baseConfig": {"type": "string", "description": "Homer YAML the generated services are merged into."},
-    "trustedCA": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {"type": "boolean"},
-        "existingConfigMap": {
-          "type": "string",
-          "pattern": "^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)?$",
-          "description": "Use this ConfigMap instead of creating <release>-trusted-ca."
-        },
-        "key": {"type": "string", "pattern": "^[-._a-zA-Z0-9]+$"}
-      },
-      "required": ["enabled", "key"]
+    "baseConfig": {
+      "type": "string",
+      "description": "Homer YAML the generated services are merged into."
+    },
+    "trustedCAConfigMap": {
+      "type": "string",
+      "pattern": "^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)?$",
+      "description": "Existing ConfigMap with extra CAs under key ca-bundle.crt (e.g. OpenShift's trusted-ca). Empty: off."
     },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
-      "properties": {"annotations": {"type": "object", "additionalProperties": {"type": "string"}}}
+      "properties": {
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
     },
-    "resources": {"type": "object"},
-    "podSecurityContext": {"type": "object"},
-    "securityContext": {"type": "object"},
-    "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
-    "tolerations": {"type": "array", "items": {"type": "object"}},
-    "affinity": {"type": "object"}
+    "resources": {
+      "type": "object"
+    },
+    "podSecurityContext": {
+      "type": "object"
+    },
+    "securityContext": {
+      "type": "object"
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "affinity": {
+      "type": "object"
+    }
   }
 }

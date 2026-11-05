@@ -28,14 +28,10 @@ baseConfig: |
   icon: "fas fa-house"
   columns: "auto"
 
-# Extra CA certificates (private GitLab, TLS-inspecting proxy, ...), appended to the public roots.
-# By default the chart creates ConfigMap <release>-trusted-ca labelled for OpenShift's trusted-CA
-# injection (config.openshift.io/inject-trusted-cabundle), which fills key ca-bundle.crt with the
-# cluster trust bundle. Elsewhere it stays empty, and only the public roots are used.
-trustedCA:
-  enabled: true
-  existingConfigMap: ""   # use this ConfigMap instead of creating one; any PEM bundle under `key`
-  key: ca-bundle.crt
+# An existing ConfigMap with extra CAs under key ca-bundle.crt, appended to the public roots.
+# Default: OpenShift's trusted-ca (an injected cluster trust bundle). Mounted optional, so where it
+# doesn't exist the pod still starts with the public roots only. Empty: no init container at all.
+trustedCAConfigMap: trusted-ca
 
 serviceAccount:
   annotations: {}    # e.g. eks.amazonaws.com/role-arn for Bedrock via IRSA

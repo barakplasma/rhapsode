@@ -76,7 +76,7 @@ extraEnv:
 Every option is in [`charts/rhapsode/values.yaml`](charts/rhapsode/values.yaml). [`values.schema.json`](charts/rhapsode/values.schema.json) checks them on install, upgrade and template, so typos and wrong types fail before anything reaches the cluster. Among them:
 
 - `homerNamespace`: install rhapsode somewhere other than Homer's namespace.
-- `trustedCA` (on by default): the chart creates ConfigMap `<release>-trusted-ca` with OpenShift's `config.openshift.io/inject-trusted-cabundle` label. The cluster trust bundle is appended to the public roots and used by both the Python side and the bundled CLI. Off OpenShift the ConfigMap stays empty and only the public roots are used. `existingConfigMap` uses your own PEM bundle instead.
+- `trustedCAConfigMap` (default `trusted-ca`): an existing ConfigMap with extra CAs under `ca-bundle.crt`, such as OpenShift's injected cluster trust bundle. They are added to the public roots and used by both the Python side and the bundled CLI. The ConfigMap is mounted as optional, so where it doesn't exist only the public roots are used. Set it empty to turn this off.
 - `serviceAccount.annotations`: for IRSA with Bedrock.
 
 ### CI
@@ -107,4 +107,4 @@ Every option is in [`charts/rhapsode/values.yaml`](charts/rhapsode/values.yaml).
 | `GITHUB_TOKEN` | empty. Needed only for private repos |
 | `GITLAB_URL`, `GITLAB_TOKEN` | empty |
 | `PROBE_VERIFY_TLS` | `true` |
-| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` | set by the chart's `trustedCA` |
+| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` | set by the chart's `trustedCAConfigMap` |

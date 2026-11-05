@@ -192,15 +192,15 @@ rhapsode writes it only when the content changed.
   - the URL is never the model's.
 - **SSRF.** `probe_url` checks the host against the discovered set and follows no
   redirects. `get_repo` has a fixed host list.
-- **Extra CAs (OpenShift trusted-ca).** By default the chart creates ConfigMap
-  `<release>-trusted-ca`, labelled `config.openshift.io/inject-trusted-cabundle`.
-  It does not reuse the name `trusted-ca`, which a namespace often already has.
-  OpenShift fills `ca-bundle.crt` with the cluster trust bundle (proxy and
-  private CAs). An init container appends that file, if present, to certifi's
-  roots, and `SSL_CERT_FILE` (httpx) and `NODE_EXTRA_CA_CERTS` (the CLI) point at
-  the result. The merge is needed because `SSL_CERT_FILE` replaces the default
-  roots. Off OpenShift the ConfigMap stays empty, so only the public roots are
-  used. The bundle is merged at pod start, so a rotated cluster CA needs a pod
+- **Extra CAs (OpenShift trusted-ca).** The chart creates nothing. It mounts an
+  existing ConfigMap (`trustedCAConfigMap`, default `trusted-ca`) as optional.
+  On OpenShift that is the ConfigMap the cluster network operator injects the
+  trust bundle into (proxy and private CAs) under `ca-bundle.crt`. An init
+  container appends that file, if present, to certifi's roots, and
+  `SSL_CERT_FILE` (httpx) and `NODE_EXTRA_CA_CERTS` (the CLI) point at the
+  result. The merge is needed because `SSL_CERT_FILE` replaces the default
+  roots. Where the ConfigMap is missing, the pod still starts with the public
+  roots. The bundle is merged at pod start, so a rotated cluster CA needs a pod
   restart.
 - **Container.** Runs as non-root with a read-only root filesystem. `HOME=/tmp`
   is an `emptyDir`, because the bundled Claude Code CLI writes session files

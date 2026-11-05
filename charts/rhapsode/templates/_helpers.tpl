@@ -13,7 +13,3 @@ helm.sh/chart: rhapsode-{{ .Chart.Version | replace "+" "_" }}
 image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
 imagePullPolicy: {{ .Values.image.pullPolicy | default (ternary "Always" "IfNotPresent" (eq (.Values.image.tag | default .Chart.AppVersion) "latest")) }}
 {{- end -}}
-
-{{- define "rhapsode.caConfigMap" -}}
-{{ .Values.trustedCA.existingConfigMap | default (printf "%s-trusted-ca" .Release.Name) }}
-{{- end -}}
