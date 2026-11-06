@@ -10,7 +10,7 @@ import yaml
 from kubernetes import config as kconfig
 
 from . import homer
-from .agent import describe, name_namespace
+from .agent import describe, name_namespace, smart_card_for
 from .approval import auth_hint
 from .config import Config
 from .discovery import Backend, backend_workload, discover, group_backends, merge_by_workload
@@ -56,6 +56,7 @@ def card(b: Backend, info: dict, approved: set[str]) -> dict | None:
     # carry the Ingress path prefix through if that ever happens
     docs = [{"url": url + d["path"], "kind": d["kind"], "title": d.get("title", "")} for d in info.get("api_docs", [])]
     return {**{k: v for k, v in info.items() if k not in ("primary_host", "api_docs", "hide", "confidence")},
+            "smart_card": smart_card_for(info.get("smart_card"), b.images),  # a cached label can predate the rule
             "namespace": b.namespace, "host": primary.host, "url": primary.url,
             "aliases": [(e.host, e.url) for e in ok if e is not primary], "api_docs": docs}
 
