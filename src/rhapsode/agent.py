@@ -14,6 +14,7 @@ CATEGORIES = ["Dev", "Media", "Monitoring", "Data", "AI", "Infra", "Home", "Tool
 SMART_CARDS = {"Gatus": "gatus", "Olivetin": "olivetin"}
 
 SYSTEM = """You label one service for a Homer dashboard. It may be reachable through several hostnames.
+Each endpoint may say `via`: then its Ingress only fronts Traefik and the Service shown is the real backend.
 Use the tools sparingly: get_workload first, then get_argocd_app (Application names usually match the
 `argocd.argoproj.io/instance` label or the namespace). If an ArgoCD source is a git repo, call get_repo on it with
 the source path's values.yaml or README; those often name the upstream project repo, which you may also get_repo.

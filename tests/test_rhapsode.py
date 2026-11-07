@@ -4,9 +4,17 @@ import dataclasses
 import pytest
 import yaml
 
-from rhapsode import agent, approval, controller, homer, tools
+from rhapsode import agent, approval, controller, discovery, homer, tools
 from rhapsode.config import Config
-from rhapsode.discovery import Endpoint, _public, group_backends, merge_by_workload
+from rhapsode.discovery import (
+    Endpoint,
+    _public,
+    group_backends,
+    merge_by_workload,
+    resolve_traefik,
+    route_hosts,
+    traefik_backends,
+)
 
 CFG = Config(ingress_classes=["cloudflare-tunnel"], gitlab_url="https://gitlab.example.com",
              base_config_path="/nonexistent")
@@ -103,6 +111,140 @@ def _backend(ns, svc, sel, *hosts, port=80):
     b = group_backends([Endpoint(f"https://{h}", h, "Ingress x/y", ns, svc, {}, port) for h in hosts])[0]
     b.selector = tuple(sel)
     return b
+
+
+@pytest.mark.parametrize("match,want", [
+    ("Host(`a.example.com`)", ["a.example.com"]),
+    ("Host(`A.Example.com`) && PathPrefix(`/api`)", ["a.example.com"]),
+    ("Host(`a.example.com`, `b.example.com`)", ["a.example.com", "b.example.com"]),
+    ("Host(`a.example.com`) || Host(`b.example.com`)", ["a.example.com", "b.example.com"]),
+    ("HostRegexp(`{sub:[a-z]+}.example.com`)", []),  # not a hostname
+    ("HostSNI(`a.example.com`)", []),
+    ("PathPrefix(`/only`)", []),
+])
+def test_route_hosts(match, want):
+    assert route_hosts(match) == want
+
+
+def _ir(ns, name, *routes):
+    return {"metadata": {"namespace": ns, "name": name}, "spec": {"routes": list(routes)}}
+
+
+def _route(match, *services, kind="Rule"):
+    return {"kind": kind, "match": match, "services": list(services)}
+
+
+def test_traefik_backends():
+    items = [
+        _ir("b", "later", _route("Host(`a.example.com`)", {"name": "from-later", "port": 80})),
+        _ir("a", "early", _route("Host(`a.example.com`) && PathPrefix(`/api`)", {"name": "api", "port": 81}),
+            _route("Host(`a.example.com`)", {"name": "web", "namespace": "other", "port": "http"})),
+        _ir("a", "special", _route("Host(`t.example.com`)", {"name": "api@internal", "kind": "TraefikService"}),
+            _route("Host(`m.example.com`)", {"name": "mw", "kind": "Middleware-ish"}),
+            _route("Host(`c.example.com`)", {"name": "c", "port": 80}, {"name": "c-canary", "port": 80}),
+            _route("Host(`x.example.com`)", {"name": "x"}, kind="Other")),
+        {"metadata": {"namespace": "a", "name": "empty"}, "spec": {}},
+    ]
+    got = traefik_backends(items)
+    # the whole-host rule beats the path-limited one, whatever the order; its Service namespace override applies
+    assert got["a.example.com"] == ("other", "web", "http", "a/early")
+    assert got["c.example.com"] == ("a", "c", 80, "a/special")  # first Service, default namespace = the route's
+    assert "t.example.com" not in got and "m.example.com" not in got and "x.example.com" not in got
+    assert traefik_backends(items[::-1]) == got  # list order does not matter
+
+
+def test_resolve_traefik_makes_the_claude_otel_grafana_one_backend():
+    def ep(host, ns, svc, port=80):
+        return Endpoint(f"https://{host}", host, f"Ingress {ns}/{host}", ns, svc, {}, port)
+
+    eps = [
+        ep("grafana.example.com", "claude-otel", "grafana"),
+        ep("dashboard.example.com", "claude-otel", "grafana"),
+        ep("claude-otel.example.com", "claude-otel", "traefik-proxy"),  # fronts Traefik: ExternalName
+        ep("convertx.example.com", "convertx", "traefik-proxy"),
+        ep("nowhere.example.com", "convertx", "traefik-proxy"),  # ExternalName with no IngressRoute: unchanged
+        ep("plain.example.com", "plain", "plain-svc"),  # real Service: never touched, even with a route for it
+    ]
+    externals = {("claude-otel", "traefik-proxy"), ("convertx", "traefik-proxy")}
+    routes = {"claude-otel.example.com": ("claude-otel", "grafana", 3000, "claude-otel/grafana-route"),
+              "convertx.example.com": ("convertx", "convertx", 3000, "convertx/convertx"),
+              "plain.example.com": ("elsewhere", "hijack", 1, "x/y")}
+    resolve_traefik(eps, externals, routes)
+    assert [(e.namespace, e.backend_service, e.backend_port, e.via) for e in eps] == [
+        ("claude-otel", "grafana", 80, ""),
+        ("claude-otel", "grafana", 80, ""),
+        ("claude-otel", "grafana", 3000, "Traefik IngressRoute claude-otel/grafana-route"),
+        ("convertx", "convertx", 3000, "Traefik IngressRoute convertx/convertx"),
+        ("convertx", "traefik-proxy", 80, ""),
+        ("plain", "plain-svc", 80, ""),
+    ]
+    out = group_backends(eps)
+    assert sorted((b.namespace, b.service, tuple(b.hosts)) for b in out) == [
+        ("claude-otel", "grafana", ("claude-otel.example.com", "dashboard.example.com", "grafana.example.com")),
+        ("convertx", "convertx", ("convertx.example.com",)),
+        ("convertx", "traefik-proxy", ("nowhere.example.com",)),
+        ("plain", "plain-svc", ("plain.example.com",))]
+    assert "Traefik IngressRoute" in next(b for b in out if b.service == "convertx").as_dict()["endpoints"][0]["via"]
+
+
+def test_discover_follows_a_traefik_fronting_ingress_to_the_real_service(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    def ingress(name, host, svc):
+        path = NS(path="/", backend=NS(service=NS(name=svc, port=NS(number=80, name=None))))
+        return NS(metadata=NS(namespace="claude-otel", name=name, annotations={}),
+                  spec=NS(ingress_class_name="cloudflare-tunnel", tls=[],
+                          rules=[NS(host=host, http=NS(paths=[path]))]))
+
+    class Net:
+        def list_ingress_for_all_namespaces(self):
+            return NS(items=[ingress("g", "grafana.example.com", "grafana"),
+                             ingress("d", "dashboard.example.com", "grafana"),
+                             ingress("c", "claude-otel.example.com", "traefik-proxy")])
+
+    class Core:
+        def list_service_for_all_namespaces(self):
+            svc = lambda n, t: NS(metadata=NS(namespace="claude-otel", name=n), spec=NS(type=t))  # noqa: E731
+            return NS(items=[svc("grafana", "ClusterIP"), svc("traefik-proxy", "ExternalName")])
+
+    class Custom:
+        def list_cluster_custom_object(self, group, version, plural):
+            if group != "traefik.io":
+                raise discovery.client.ApiException(status=404)  # no Gateway API here
+            return {"items": [_ir("claude-otel", "grafana-route", _route(
+                "Host(`claude-otel.example.com`)", {"name": "grafana", "port": 3000}))]}
+
+    monkeypatch.setattr(discovery.client, "NetworkingV1Api", Net)
+    monkeypatch.setattr(discovery.client, "CoreV1Api", Core)
+    monkeypatch.setattr(discovery.client, "CustomObjectsApi", Custom)
+    eps = discovery.discover(CFG)
+    assert [(e.host, e.backend_service, e.via) for e in eps] == [
+        ("claude-otel.example.com", "grafana", "Traefik IngressRoute claude-otel/grafana-route"),
+        ("dashboard.example.com", "grafana", ""),
+        ("grafana.example.com", "grafana", "")]
+    assert [(b.service, len(b.endpoints)) for b in group_backends(eps)] == [("grafana", 3)]
+
+
+@pytest.mark.parametrize("status,want", [(404, []), (403, [])])
+def test_missing_traefik_crd_or_permission_is_not_fatal(monkeypatch, caplog, status, want):
+    class Api:
+        def list_cluster_custom_object(self, *a):
+            raise discovery.client.ApiException(status=status)
+
+    monkeypatch.setattr(discovery.client, "CustomObjectsApi", Api)
+    with caplog.at_level("WARNING", logger="rhapsode"):
+        assert discovery._ingress_routes() == want
+    assert ("403" in caplog.text) == (status == 403)  # only a permission problem is worth a warning
+
+
+def test_other_traefik_api_errors_are_raised(monkeypatch):
+    class Api:
+        def list_cluster_custom_object(self, *a):
+            raise discovery.client.ApiException(status=500)
+
+    monkeypatch.setattr(discovery.client, "CustomObjectsApi", Api)
+    with pytest.raises(discovery.client.ApiException):
+        discovery._ingress_routes()
 
 
 def test_merge_by_workload_joins_services_that_select_the_same_pods():

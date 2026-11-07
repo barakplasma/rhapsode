@@ -85,6 +85,25 @@ one **backend**: one agent run, one Homer card. Three hostnames for one Grafana
 become one card, and the extra hostnames become link pills on it. A route with
 no Service is a backend of its own.
 
+**Through Traefik.** Several apps here sit behind an Ingress whose backend is
+an ExternalName Service (`traefik-proxy`, pointing at Traefik), with the real
+routing in a Traefik IngressRoute. That Ingress says nothing about the app: the
+Service has no selector, no pods and no images. So for an endpoint whose
+backend is an ExternalName Service, rhapsode looks up the IngressRoute rule
+for its hostname and uses the Service that rule sends traffic to, in that
+Service's own namespace. A rule for the whole host beats one limited by path or
+header, and ties go to the first IngressRoute by namespace and name. Only plain
+Services count: a TraefikService such as `api@internal` has no workload. An
+endpoint with no matching rule, or whose Service has a real backend, is left
+alone. The agent sees `via: Traefik IngressRoute <ns>/<name>` on the endpoint.
+Without this, the agent had no pods or images for those apps, a new release did
+not trigger a relabel, and a host served by Grafana through Traefik could not be
+merged with the Grafana Service the other hosts use. It needs `list` on
+`traefik.io` `ingressroutes`. A missing CRD means no Traefik and is skipped; a
+missing permission is logged as a warning and skipped, so upgrading the image
+before the chart does not stop the dashboard. Only the `traefik.io` group is
+read, not the older `traefik.containo.us`.
+
 Two *Services* can still front the same pods (a second Service or Ingress added
 for the same Grafana). So backends in one namespace whose Services have the
 same pod selector are merged too, keeping the alphabetically first Service
@@ -314,8 +333,8 @@ flowchart TD
 
 ## Security
 
-- **RBAC.** Cluster-wide `get, list` on Services, Pods, Ingresses and
-  HTTPRoutes, plus `get` on Argo CD Applications. Write access only to its three
+- **RBAC.** Cluster-wide `get, list` on Services, Pods, Ingresses, HTTPRoutes
+  and Traefik IngressRoutes, plus `get` on Argo CD Applications. Write access only to its three
   ConfigMaps in `homer` (the Homer files, the cache, the pending list). No
   Secrets.
 - **Prompt injection.** Every tool result is data an outsider may have written

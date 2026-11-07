@@ -1,9 +1,13 @@
 """Find public Ingress and Gateway API HTTPRoute endpoints, and group them by the Service behind them."""
+import logging
+import re
 from dataclasses import asdict, dataclass, field
 
 from kubernetes import client
 
 from .config import Config
+
+log = logging.getLogger("rhapsode")
 
 IGNORE = "rhapsode/ignore"  # annotation: "true" hides it, "false" forces it public
 
@@ -17,6 +21,7 @@ class Endpoint:
     backend_service: str
     annotations: dict
     backend_port: int | str = ""  # Service port number or name; "" when unknown
+    via: str = ""  # "Traefik IngressRoute ns/name" when the Ingress only fronts Traefik (ExternalName Service)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -42,7 +47,7 @@ class Backend:
 
     def as_dict(self) -> dict:
         return {"namespace": self.namespace, "service": self.service, "port": self.port, "images": self.images,
-                "endpoints": [{"url": e.url, "source": e.source, "annotations": e.annotations}
+                "endpoints": [{"url": e.url, "source": e.source, "via": e.via, "annotations": e.annotations}
                               for e in self.endpoints]}
 
 
@@ -105,6 +110,66 @@ def _ann(meta) -> dict:
     return {k: v for k, v in (meta.annotations or {}).items() if not k.startswith("kubectl.")}
 
 
+_HOST_CALL = re.compile(r"Host\(([^)]*)\)")  # not HostRegexp( or HostSNI(: "Host" must be followed by "("
+_TICKED = re.compile(r"`([^`]+)`")
+_NARROWER = re.compile(r"Path|Header|Method|Query|ClientIP")  # a rule limited to part of a host's traffic
+
+
+def route_hosts(match: str) -> list[str]:
+    """Hostnames in a Traefik router rule: Host(`a`, `b`) && PathPrefix(`/x`) -> [a, b]."""
+    return [h.lower() for call in _HOST_CALL.findall(match) for h in _TICKED.findall(call)]
+
+
+def traefik_backends(items: list[dict]) -> dict[str, tuple]:
+    """host -> (namespace, service, port, "ns/name" of the IngressRoute), from IngressRoute objects. A rule for the
+    whole host beats one limited by path or header; ties go to the first IngressRoute by namespace and name. Only
+    plain Services count (a TraefikService such as api@internal has no workload to look at)."""
+    best: dict[str, tuple] = {}
+    for ir in sorted(items, key=lambda i: (i["metadata"]["namespace"], i["metadata"]["name"])):
+        ns, name = ir["metadata"]["namespace"], ir["metadata"]["name"]
+        for route in (ir.get("spec") or {}).get("routes") or []:
+            svcs = [s for s in route.get("services") or [] if s.get("name") and s.get("kind", "Service") == "Service"]
+            if route.get("kind", "Rule") != "Rule" or not svcs:
+                continue
+            s = svcs[0]
+            narrow = bool(_NARROWER.search(route.get("match", "")))
+            for host in route_hosts(route.get("match", "")):
+                if host not in best or (best[host][0] and not narrow):
+                    best[host] = (narrow, s.get("namespace") or ns, s["name"], s.get("port", ""), f"{ns}/{name}")
+    return {h: v[1:] for h, v in best.items()}
+
+
+def resolve_traefik(endpoints: list[Endpoint], externals: set[tuple], routes: dict[str, tuple]) -> None:
+    """An Ingress that fronts Traefik (its backend is an ExternalName Service) says nothing about the app behind
+    it. Point such endpoints at the Service the host's IngressRoute really sends traffic to, so the workload,
+    its images and its other hostnames are visible. Endpoints whose Service has a real backend are left alone."""
+    for e in endpoints:
+        r = routes.get(e.host.lower()) if (e.namespace, e.backend_service) in externals else None
+        if r:
+            e.namespace, e.backend_service, e.backend_port, ref = r
+            e.via = f"Traefik IngressRoute {ref}"
+
+
+def _external_names() -> set[tuple]:
+    """(namespace, name) of every ExternalName Service: a Service with no pods of its own. Filtered here, not with
+    a field selector, so it doesn't depend on which Service fields the API server can select on."""
+    return {(s.metadata.namespace, s.metadata.name)
+            for s in client.CoreV1Api().list_service_for_all_namespaces().items if s.spec.type == "ExternalName"}
+
+
+def _ingress_routes() -> list[dict]:
+    """Traefik IngressRoutes. Optional like Gateway API: no CRD means no Traefik; a missing permission (the chart
+    was not upgraded alongside the image) is logged, not fatal."""
+    try:
+        return client.CustomObjectsApi().list_cluster_custom_object("traefik.io", "v1alpha1", "ingressroutes")["items"]
+    except client.ApiException as e:
+        if e.status == 403:
+            log.warning("cannot list Traefik IngressRoutes (403): grant list on traefik.io ingressroutes")
+        elif e.status != 404:
+            raise
+        return []
+
+
 def discover(cfg: Config) -> list[Endpoint]:
     found: dict[str, Endpoint] = {}
 
@@ -151,4 +216,7 @@ def discover(cfg: Config) -> list[Endpoint]:
                     Endpoint(f"https://{host}", host, f"HTTPRoute {ns}/{name}", ns,
                              refs[0]["name"] if refs else "", ann, refs[0].get("port", "") if refs else ""),
                 )
+    externals = _external_names()
+    if any((e.namespace, e.backend_service) in externals for e in found.values()):
+        resolve_traefik(list(found.values()), externals, traefik_backends(_ingress_routes()))
     return sorted(found.values(), key=lambda e: e.host)
