@@ -153,6 +153,47 @@ def test_traefik_backends():
     assert traefik_backends(items[::-1]) == got  # list order does not matter
 
 
+def test_a_whole_host_traefikservice_rule_is_not_overridden_by_a_narrower_service_rule():
+    items = [_ir("x", "r",
+                 _route("Host(`a.example.com`)", {"name": "wrr", "kind": "TraefikService"}),
+                 _route("Host(`a.example.com`) && PathPrefix(`/api`)", {"name": "api", "port": 80}))]
+    assert traefik_backends(items) == {}  # "/" is served by something that is not a Service: don't guess "api"
+
+
+def test_a_host_with_only_path_limited_rules_resolves_only_if_they_agree():
+    def one(*rules):
+        return traefik_backends([_ir("x", "r", *[_route(f"Host(`a.example.com`) && PathPrefix(`{p}`)", svc)
+                                                  for p, svc in rules])])
+
+    y, z = {"name": "y", "port": 80}, {"name": "z", "port": 80}
+    assert one(("/y", y), ("/z", z)) == {}  # two apps share the host: nothing says which one the host is
+    assert one(("/y", y), ("/y2", y)) == {"a.example.com": ("x", "y", 80, "x/r")}
+    assert one(("/y", y), ("/t", {"name": "t", "kind": "TraefikService"})) == {}
+
+
+def test_a_route_into_an_excluded_namespace_is_not_followed():
+    ep = Endpoint("https://t.example.com", "t.example.com", "Ingress apps/t", "apps", "traefik-proxy", {}, 80)
+    routes = {"t.example.com": ("kube-system", "traefik-dashboard", 9000, "apps/t")}
+    resolve_traefik([ep], {("apps", "traefik-proxy")}, routes, exclude=["kube-system"])
+    assert (ep.namespace, ep.backend_service, ep.via) == ("apps", "traefik-proxy", "")  # as before the change
+    resolve_traefik([ep], {("apps", "traefik-proxy")}, routes, exclude=[])
+    assert (ep.namespace, ep.backend_service) == ("kube-system", "traefik-dashboard")
+
+
+def test_a_hostname_containing_path_is_not_a_path_limited_rule():
+    # If "Pathfinder" in the hostname were read as a path limit, the first rule would count as path-limited, the two
+    # rules would name different Services, and the host would stay unresolved. As a whole-host rule it decides alone.
+    items = [_ir("x", "a", _route("Host(`Pathfinder.example.com`)", {"name": "pf", "port": 80})),
+             _ir("x", "b", _route("Host(`pathfinder.example.com`) && PathPrefix(`/api`)", {"name": "api"}))]
+    assert traefik_backends(items) == {"pathfinder.example.com": ("x", "pf", 80, "x/a")}
+
+
+def test_route_hosts_accepts_double_quotes_and_a_missing_match():
+    assert route_hosts('Host("a.example.com") && PathPrefix("/x")') == ["a.example.com"]
+    assert route_hosts("Host(`a.example.com`, \"b.example.com\")") == ["a.example.com", "b.example.com"]
+    assert traefik_backends([_ir("x", "r", {"kind": "Rule", "match": None, "services": [{"name": "s"}]})]) == {}
+
+
 def test_resolve_traefik_makes_the_claude_otel_grafana_one_backend():
     def ep(host, ns, svc, port=80):
         return Endpoint(f"https://{host}", host, f"Ingress {ns}/{host}", ns, svc, {}, port)

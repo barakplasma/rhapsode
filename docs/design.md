@@ -91,11 +91,17 @@ routing in a Traefik IngressRoute. That Ingress says nothing about the app: the
 Service has no selector, no pods and no images. So for an endpoint whose
 backend is an ExternalName Service, rhapsode looks up the IngressRoute rule
 for its hostname and uses the Service that rule sends traffic to, in that
-Service's own namespace. A rule for the whole host beats one limited by path or
-header, and ties go to the first IngressRoute by namespace and name. Only plain
-Services count: a TraefikService such as `api@internal` has no workload. An
-endpoint with no matching rule, or whose Service has a real backend, is left
-alone. The agent sees `via: Traefik IngressRoute <ns>/<name>` on the endpoint.
+Service's own namespace. The first rule for the whole host decides (by
+IngressRoute namespace and name). If it goes to something other than a plain
+Service, such as a TraefikService (a weighted canary, `api@internal`), the host
+stays unresolved, and a narrower rule must not stand in for it. A host with only
+path- or header-limited rules resolves only when they all name the same Service,
+because otherwise nothing says which app the host is. Rules may quote hostnames
+with backticks or double quotes. An endpoint with no matching rule, whose Service
+has a real backend, or whose route leads into an excluded namespace
+(`EXCLUDE_NAMESPACES`; only the Ingress's own namespace was checked when it was
+admitted) is left alone. The agent sees `via: Traefik IngressRoute <ns>/<name>`
+on the endpoint.
 Without this, the agent had no pods or images for those apps, a new release did
 not trigger a relabel, and a host served by Grafana through Traefik could not be
 merged with the Grafana Service the other hosts use. It needs `list` on

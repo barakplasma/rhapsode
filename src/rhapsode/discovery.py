@@ -111,7 +111,7 @@ def _ann(meta) -> dict:
 
 
 _HOST_CALL = re.compile(r"Host\(([^)]*)\)")  # not HostRegexp( or HostSNI(: "Host" must be followed by "("
-_TICKED = re.compile(r"`([^`]+)`")
+_TICKED = re.compile(r"[`\"]([^`\"]+)[`\"]")  # Traefik accepts backticks and double quotes
 _NARROWER = re.compile(r"Path|Header|Method|Query|ClientIP")  # a rule limited to part of a host's traffic
 
 
@@ -121,31 +121,51 @@ def route_hosts(match: str) -> list[str]:
 
 
 def traefik_backends(items: list[dict]) -> dict[str, tuple]:
-    """host -> (namespace, service, port, "ns/name" of the IngressRoute), from IngressRoute objects. A rule for the
-    whole host beats one limited by path or header; ties go to the first IngressRoute by namespace and name. Only
-    plain Services count (a TraefikService such as api@internal has no workload to look at)."""
-    best: dict[str, tuple] = {}
+    """host -> (namespace, service, port, "ns/name" of the IngressRoute), from IngressRoute objects.
+
+    The first rule for the whole host (by IngressRoute namespace and name) decides. If it goes to something other
+    than a plain Service, such as a TraefikService (a weighted canary, api@internal), the host stays unresolved:
+    a narrower rule must not stand in for it. A host with only path- or header-limited rules resolves only when
+    they all name the same Service, because otherwise nothing says which app the host is."""
+    whole: dict[str, tuple | None] = {}
+    narrow: dict[str, list[tuple | None]] = {}
     for ir in sorted(items, key=lambda i: (i["metadata"]["namespace"], i["metadata"]["name"])):
         ns, name = ir["metadata"]["namespace"], ir["metadata"]["name"]
         for route in (ir.get("spec") or {}).get("routes") or []:
-            svcs = [s for s in route.get("services") or [] if s.get("name") and s.get("kind", "Service") == "Service"]
-            if route.get("kind", "Rule") != "Rule" or not svcs:
+            if route.get("kind", "Rule") != "Rule":
                 continue
-            s = svcs[0]
-            narrow = bool(_NARROWER.search(route.get("match", "")))
-            for host in route_hosts(route.get("match", "")):
-                if host not in best or (best[host][0] and not narrow):
-                    best[host] = (narrow, s.get("namespace") or ns, s["name"], s.get("port", ""), f"{ns}/{name}")
-    return {h: v[1:] for h, v in best.items()}
+            match = route.get("match") or ""
+            svc = next(iter(route.get("services") or []), None)
+            plain = svc if svc and svc.get("name") and svc.get("kind", "Service") == "Service" else None
+            target = None
+            if plain:
+                target = (plain.get("namespace") or ns, plain["name"], plain.get("port", ""), f"{ns}/{name}")
+            limited = bool(_NARROWER.search(_HOST_CALL.sub("", match)))  # a hostname like Path.x is not a limit
+            for host in route_hosts(match):
+                if limited:
+                    narrow.setdefault(host, []).append(target)
+                else:
+                    whole.setdefault(host, target)
+    out = {}
+    for host in whole.keys() | narrow.keys():
+        if host in whole:
+            if whole[host]:
+                out[host] = whole[host]
+        elif all(narrow[host]) and len({t[:2] for t in narrow[host]}) == 1:
+            out[host] = narrow[host][0]
+    return out
 
 
-def resolve_traefik(endpoints: list[Endpoint], externals: set[tuple], routes: dict[str, tuple]) -> None:
+def resolve_traefik(endpoints: list[Endpoint], externals: set[tuple], routes: dict[str, tuple],
+                    exclude=()) -> None:
     """An Ingress that fronts Traefik (its backend is an ExternalName Service) says nothing about the app behind
     it. Point such endpoints at the Service the host's IngressRoute really sends traffic to, so the workload,
-    its images and its other hostnames are visible. Endpoints whose Service has a real backend are left alone."""
+    its images and its other hostnames are visible. Endpoints whose Service has a real backend are left alone,
+    and so are those whose route leads into an excluded namespace (the Ingress's own namespace was the only one
+    checked when the endpoint was admitted)."""
     for e in endpoints:
         r = routes.get(e.host.lower()) if (e.namespace, e.backend_service) in externals else None
-        if r:
+        if r and r[0] not in exclude:
             e.namespace, e.backend_service, e.backend_port, ref = r
             e.via = f"Traefik IngressRoute {ref}"
 
@@ -218,5 +238,5 @@ def discover(cfg: Config) -> list[Endpoint]:
                 )
     externals = _external_names()
     if any((e.namespace, e.backend_service) in externals for e in found.values()):
-        resolve_traefik(list(found.values()), externals, traefik_backends(_ingress_routes()))
+        resolve_traefik(list(found.values()), externals, traefik_backends(_ingress_routes()), cfg.exclude_namespaces)
     return sorted(found.values(), key=lambda e: e.host)
